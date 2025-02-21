@@ -12,6 +12,11 @@ import (
     "time"
 )
 
+// Settings はローカル設定ファイルから読み込む構造体
+type Settings struct {
+    URL string `json:"url"`
+}
+
 // TunnelConfig はJSONから読み込むトンネル設定を表す構造体
 type TunnelConfig struct {
     Gif           string `json:"gif"`
@@ -91,7 +96,26 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
     return gifInterfaces, bridgeInterfaces
 }
 
-// fetchJSON はHTTPサーバーからJSONデータを取得
+// loadSettings はローカルの設定ファイルからURLを読み込む
+func loadSettings(filename string) (Settings, error) {
+    data, err := ioutil.ReadFile(filename)
+    if err != nil {
+        return Settings{}, fmt.Errorf("failed to read settings file: %v", err)
+    }
+
+    var settings Settings
+    if err := json.Unmarshal(data, &settings); err != nil {
+        return Settings{}, fmt.Errorf("failed to unmarshal settings: %v", err)
+    }
+
+    if settings.URL == "" {
+        return Settings{}, fmt.Errorf("URL is not specified in settings file")
+    }
+
+    return settings, nil
+}
+
+// fetchJSON は指定されたURLからJSONデータを取得
 func fetchJSON(url string) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
@@ -112,7 +136,7 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
 }
 
 // applyConfig は差分に基づいて設定を適用
-func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig) {
+func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig) {
     // gifインターフェースの削除
     for gif := range gifsToRemove {
         if err := runCommand("ifconfig", gif, "destroy"); err != nil {
@@ -142,14 +166,14 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
         }
     }
 
-    // VLANの設定
-    for _, config := range gifsToAdd {
-        vlanIface := fmt.Sprintf("em0.%s", config.Vlan)
+    // VLANの設定（物理インターフェース名を動的に取得）
+    for _, config := range configs {
+        vlanIface := fmt.Sprintf("%s.%s", config.PhysicalIface, config.VlanID)
         if err := runCommand("ifconfig", vlanIface, "create"); err != nil {
             log.Printf("Failed to create VLAN %s: %v", vlanIface, err)
             continue
         }
-        if err := runCommand("ifconfig", vlanIface, "vlan", config.Vlan, "vlandev", "em0", "up"); err != nil {
+        if err := runCommand("ifconfig", vlanIface, "vlan", config.VlanID, "vlandev", config.PhysicalIface, "up"); err != nil {
             log.Printf("Failed to configure VLAN %s: %v", vlanIface, err)
         }
     }
@@ -211,22 +235,34 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     return gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove
 }
 
-// main は定期的にJSONをフェッチして設定を更新
+// main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
 func main() {
-    url := "http://example.com/config.json" // JSONを提供するサーバーのURL
-    interval := 30 * time.Second            // フェッチ間隔
+    settingsFile := "settings.json" // ローカル設定ファイル
+    interval := 30 * time.Second    // フェッチ間隔
 
     for {
-        currentGifs, currentBridges := getCurrentInterfaces()
-        configs, err := fetchJSON(url)
+        // ローカル設定ファイルからURLを読み込み
+        settings, err := loadSettings(settingsFile)
         if err != nil {
-            log.Printf("Failed to fetch JSON: %v", err)
+            log.Printf("Failed to load settings: %v", err)
             time.Sleep(interval)
             continue
         }
 
+        // 現在のインターフェース状態を取得
+        currentGifs, currentBridges := getCurrentInterfaces()
+
+        // URLからJSONデータをフェッチ
+        configs, err := fetchJSON(settings.URL)
+        if err != nil {
+            log.Printf("Failed to fetch JSON from %s: %v", settings.URL, err)
+            time.Sleep(interval)
+            continue
+        }
+
+        // 差分を計算し設定を適用
         gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs)
-        applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove)
+        applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, configs)
 
         log.Printf("Configuration check completed. Sleeping for %v...", interval)
         time.Sleep(interval)
