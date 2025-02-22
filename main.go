@@ -141,7 +141,7 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
-// fetchJSON は指定されたURLからJSONデータを取得し、重複をチェック
+// fetchJSON は指定されたURLからJSONデータを取得し、重複と欠落をチェック
 func fetchJSON(url string) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
@@ -159,26 +159,53 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
         return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
     }
 
-    // 重複チェック
+    // 有効な設定のみを収集
+    var validConfigs []TunnelConfig
     tunnelIDs := make(map[string]bool)
     dstAddrs := make(map[string]bool)
     vlanIDs := make(map[string]bool)
+
     for i, config := range configs {
+        // 欠落チェック
+        if config.TunnelID == "" {
+            log.Printf("Skipping tunnel at index %d: missing tunnel_id", i)
+            continue
+        }
+        if config.SrcAddr == "" {
+            log.Printf("Skipping tunnel at index %d: missing src_addr", i)
+            continue
+        }
+        if config.DstAddr == "" {
+            log.Printf("Skipping tunnel at index %d: missing dst_addr", i)
+            continue
+        }
+        if config.VlanID == "" {
+            log.Printf("Skipping tunnel at index %d: missing vlan_id", i)
+            continue
+        }
+
+        // 重複チェック
         if tunnelIDs[config.TunnelID] {
-            return nil, fmt.Errorf("duplicate tunnel_id found: %s at index %d", config.TunnelID, i)
+            log.Printf("Skipping tunnel at index %d: duplicate tunnel_id found: %s", i, config.TunnelID)
+            continue
         }
         if dstAddrs[config.DstAddr] {
-            return nil, fmt.Errorf("duplicate dst_addr found: %s at index %d", config.DstAddr, i)
+            log.Printf("Skipping tunnel at index %d: duplicate dst_addr found: %s", i, config.DstAddr)
+            continue
         }
         if vlanIDs[config.VlanID] {
-            return nil, fmt.Errorf("duplicate vlan_id found: %s at index %d", config.VlanID, i)
+            log.Printf("Skipping tunnel at index %d: duplicate vlan_id found: %s", i, config.VlanID)
+            continue
         }
+
+        // 有効な設定として追加
+        validConfigs = append(validConfigs, config)
         tunnelIDs[config.TunnelID] = true
         dstAddrs[config.DstAddr] = true
         vlanIDs[config.VlanID] = true
     }
 
-    return configs, nil
+    return validConfigs, nil
 }
 
 // membersEqual は2つのメンバーリストが順序に関係なく一致するか確認
