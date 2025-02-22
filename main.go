@@ -4,8 +4,9 @@ import (
     "encoding/json"
     "fmt"
     "io/ioutil"
-    "log"
+    "log/slog"
     "net/http"
+    "os"
     "os/exec"
     "regexp"
     "strings"
@@ -47,17 +48,17 @@ func runCommand(cmd string, args ...string) error {
         command := exec.Command(cmd, args...)
         output, err := command.CombinedOutput()
         if err == nil {
-            log.Printf("Command succeeded: %s %v", cmd, args)
+            slog.Info("Command succeeded", "cmd", cmd, "args", args)
             return nil
         }
         outputStr := string(output)
         if strings.Contains(outputStr, "already exists") {
-            log.Printf("Interface already exists, skipping creation: %s %v", cmd, args)
+            slog.Info("Interface already exists, skipping creation", "cmd", cmd, "args", args)
             return nil
         }
-        log.Printf("Command failed: %s %v, Error: %s", cmd, args, outputStr)
+        slog.Error("Command failed", "cmd", cmd, "args", args, "error", outputStr)
         if attempt < 2 {
-            log.Printf("Retrying in 1 second...")
+            slog.Info("Retrying in 1 second")
             time.Sleep(time.Second)
         }
     }
@@ -72,7 +73,7 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
 
     output, err := exec.Command("ifconfig", "-a").Output()
     if err != nil {
-        log.Printf("Failed to get current interfaces: %v", err)
+        slog.Error("Failed to get current interfaces", "error", err)
         return gifInterfaces, bridgeInterfaces, vlanInterfaces
     }
 
@@ -168,33 +169,33 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
     for i, config := range configs {
         // 欠落チェック
         if config.TunnelID == "" {
-            log.Printf("Skipping tunnel at index %d: missing tunnel_id", i)
+            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing tunnel_id")
             continue
         }
         if config.SrcAddr == "" {
-            log.Printf("Skipping tunnel at index %d: missing src_addr", i)
+            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing src_addr")
             continue
         }
         if config.DstAddr == "" {
-            log.Printf("Skipping tunnel at index %d: missing dst_addr", i)
+            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing dst_addr")
             continue
         }
         if config.VlanID == "" {
-            log.Printf("Skipping tunnel at index %d: missing vlan_id", i)
+            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing vlan_id")
             continue
         }
 
         // 重複チェック
         if tunnelIDs[config.TunnelID] {
-            log.Printf("Skipping tunnel at index %d: duplicate tunnel_id found: %s", i, config.TunnelID)
+            slog.Error("Skipping tunnel due to duplicate", "index", i, "tunnel_id", config.TunnelID)
             continue
         }
         if dstAddrs[config.DstAddr] {
-            log.Printf("Skipping tunnel at index %d: duplicate dst_addr found: %s", i, config.DstAddr)
+            slog.Error("Skipping tunnel due to duplicate", "index", i, "dst_addr", config.DstAddr)
             continue
         }
         if vlanIDs[config.VlanID] {
-            log.Printf("Skipping tunnel at index %d: duplicate vlan_id found: %s", i, config.VlanID)
+            slog.Error("Skipping tunnel due to duplicate", "index", i, "vlan_id", config.VlanID)
             continue
         }
 
@@ -237,14 +238,14 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
     // gifインターフェースの削除
     for gif := range gifsToRemove {
         if err := runCommand("ifconfig", gif, "destroy"); err != nil {
-            log.Printf("Failed to remove gif interface %s: %v", gif, err)
+            slog.Error("Failed to remove gif interface", "gif", gif, "error", err)
         }
     }
 
     // bridgeインターフェースの削除
     for bridge := range bridgesToRemove {
         if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
-            log.Printf("Failed to remove bridge interface %s: %v", bridge, err)
+            slog.Error("Failed to remove bridge interface", "bridge", bridge, "error", err)
         }
     }
 
@@ -260,7 +261,7 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
         // gifインターフェース
         if current, exists := currentGifs[gif]; exists {
             if current.Src == config.SrcAddr && current.Dst == config.DstAddr && current.IsIPv6 == strings.Contains(config.SrcAddr, ":") {
-                log.Printf("gif %s already exists with correct config, skipping", gif)
+                slog.Info("gif already exists with correct config, skipping", "gif", gif)
             } else {
                 tunnelArgs := []string{gif}
                 if strings.Contains(config.SrcAddr, ":") {
@@ -268,16 +269,16 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
                 }
                 tunnelArgs = append(tunnelArgs, "tunnel", config.SrcAddr, config.DstAddr)
                 if err := runCommand("ifconfig", tunnelArgs...); err != nil {
-                    log.Printf("Failed to configure tunnel for %s: %v", gif, err)
+                    slog.Error("Failed to configure tunnel", "gif", gif, "error", err)
                     continue
                 }
                 if err := runCommand("ifconfig", gif, "up"); err != nil {
-                    log.Printf("Failed to bring up gif %s: %v", gif, err)
+                    slog.Error("Failed to bring up gif", "gif", gif, "error", err)
                 }
             }
         } else {
             if err := runCommand("ifconfig", gif, "create"); err != nil {
-                log.Printf("Failed to create gif %s: %v", gif, err)
+                slog.Error("Failed to create gif", "gif", gif, "error", err)
                 continue
             }
             tunnelArgs := []string{gif}
@@ -286,30 +287,30 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
             }
             tunnelArgs = append(tunnelArgs, "tunnel", config.SrcAddr, config.DstAddr)
             if err := runCommand("ifconfig", tunnelArgs...); err != nil {
-                log.Printf("Failed to configure tunnel for %s: %v", gif, err)
+                slog.Error("Failed to configure tunnel", "gif", gif, "error", err)
                 continue
             }
             if err := runCommand("ifconfig", gif, "up"); err != nil {
-                log.Printf("Failed to bring up gif %s: %v", gif, err)
+                slog.Error("Failed to bring up gif", "gif", gif, "error", err)
             }
         }
 
         // VLANの設定
         if vlanID, exists := currentVLANs[vlanIface]; exists && vlanID == config.VlanID {
-            log.Printf("VLAN %s already exists with correct config, skipping", vlanIface)
+            slog.Info("VLAN already exists with correct config, skipping", "vlan", vlanIface)
         } else {
             if _, exists := currentVLANs[vlanIface]; exists {
                 if err := runCommand("ifconfig", vlanIface, "destroy"); err != nil {
-                    log.Printf("Failed to remove VLAN %s for reconfiguration: %v", vlanIface, err)
+                    slog.Error("Failed to remove VLAN for reconfiguration", "vlan", vlanIface, "error", err)
                     continue
                 }
             }
             if err := runCommand("ifconfig", vlanIface, "create"); err != nil {
-                log.Printf("Failed to create VLAN %s: %v", vlanIface, err)
+                slog.Error("Failed to create VLAN", "vlan", vlanIface, "error", err)
                 continue
             }
             if err := runCommand("ifconfig", vlanIface, "vlan", config.VlanID, "vlandev", settings.PhysicalIface, "up"); err != nil {
-                log.Printf("Failed to configure VLAN %s: %v", vlanIface, err)
+                slog.Error("Failed to configure VLAN", "vlan", vlanIface, "error", err)
             }
         }
 
@@ -317,32 +318,32 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
         expectedMembers := []string{gif, vlanIface}
         if current, exists := currentBridges[bridge]; exists {
             if membersEqual(current.Members, expectedMembers) {
-                log.Printf("bridge %s already exists with correct config, skipping", bridge)
+                slog.Info("bridge already exists with correct config, skipping", "bridge", bridge)
                 continue
             }
             if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
-                log.Printf("Failed to remove bridge %s for reconfiguration: %v", bridge, err)
+                slog.Error("Failed to remove bridge for reconfiguration", "bridge", bridge, "error", err)
                 continue
             }
         }
         if err := runCommand("ifconfig", bridge, "create"); err != nil {
-            log.Printf("Failed to create bridge %s: %v", bridge, err)
+            slog.Error("Failed to create bridge", "bridge", bridge, "error", err)
             continue
         }
         for _, member := range expectedMembers {
             if err := runCommand("ifconfig", bridge, "addm", member); err != nil {
-                log.Printf("Failed to add member %s to bridge %s: %v", member, bridge, err)
+                slog.Error("Failed to add member to bridge", "member", member, "bridge", bridge, "error", err)
             }
         }
         if err := runCommand("ifconfig", bridge, "up"); err != nil {
-            log.Printf("Failed to bring up bridge %s: %v", bridge, err)
+            slog.Error("Failed to bring up bridge", "bridge", bridge, "error", err)
         }
     }
 
     // 未使用のVLANインターフェースの削除
     for vlan := range vlanToRemove {
         if err := runCommand("ifconfig", vlan, "destroy"); err != nil {
-            log.Printf("Failed to remove unused VLAN %s: %v", vlan, err)
+            slog.Error("Failed to remove unused VLAN", "vlan", vlan, "error", err)
         }
     }
 }
@@ -395,13 +396,18 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 
 // main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
 func main() {
+    // slogの設定（デフォルトでレベル付きログを出力）
+    slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+        AddSource: false,
+    })))
+
     settingsFile := "settings.json"
     interval := 30 * time.Second
 
     for {
         settings, err := loadSettings(settingsFile)
         if err != nil {
-            log.Printf("Failed to load settings: %v", err)
+            slog.Error("Failed to load settings", "error", err)
             time.Sleep(interval)
             continue
         }
@@ -409,7 +415,7 @@ func main() {
         currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
         configs, err := fetchJSON(settings.URL)
         if err != nil {
-            log.Printf("Failed to fetch JSON from %s: %v", settings.URL, err)
+            slog.Error("Failed to fetch JSON", "url", settings.URL, "error", err)
             time.Sleep(interval)
             continue
         }
@@ -417,7 +423,7 @@ func main() {
         gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
         applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
 
-        log.Printf("Configuration check completed. Sleeping for %v...", interval)
+        slog.Info("Configuration check completed", "sleep", interval)
         time.Sleep(interval)
     }
 }
