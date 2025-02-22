@@ -2,10 +2,12 @@ package main
 
 import (
     "bytes"
+    "context"
     "encoding/json"
     "fmt"
     "io/ioutil"
     "log/slog"
+    "net"
     "net/http"
     "os"
     "os/exec"
@@ -23,10 +25,11 @@ type Settings struct {
 
 // TunnelConfig はJSONから読み込むトンネル設定を表す構造体
 type TunnelConfig struct {
-    TunnelID string `json:"tunnel_id"`
-    SrcAddr  string `json:"src_addr"`
-    DstAddr  string `json:"dst_addr"`
-    VlanID   string `json:"vlan_id"`
+    TunnelID    string `json:"tunnel_id"`
+    SrcAddr     string `json:"src_addr"`
+    DstAddr     string `json:"dst_addr"`
+    DstHostname string `json:"dst_hostname,omitempty"`
+    VlanID      string `json:"vlan_id"`
 }
 
 // InterfaceConfig はインターフェースの設定を表す構造体
@@ -50,8 +53,8 @@ type SlackHandler struct {
     SlackWebhookURL string
 }
 
-func (h *SlackHandler) Handle(r slog.Record) error {
-    err := h.Handler.Handle(r)
+func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
+    err := h.Handler.Handle(ctx, r)
     if r.Level >= slog.LevelWarn && h.SlackWebhookURL != "" {
         go sendToSlack(r, h.SlackWebhookURL)
     }
@@ -64,7 +67,6 @@ func sendToSlack(r slog.Record, webhookURL string) {
         hostname = "unknown"
     }
 
-    // Slackメッセージの構築（ホスト名を追加）
     msg := fmt.Sprintf("[%s] %s: %s", hostname, r.Level.String(), r.Message)
     var attrs []slog.Attr
     r.Attrs(func(a slog.Attr) bool {
@@ -80,7 +82,6 @@ func sendToSlack(r slog.Record, webhookURL string) {
     }
     payloadBytes, _ := json.Marshal(payload)
 
-    // 非同期でSlackに送信
     resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to send to Slack: %v\n", err)
@@ -92,7 +93,7 @@ func sendToSlack(r slog.Record, webhookURL string) {
 // notifyConfigDiff は差分をslog経由でINFOとして出力し、Slackにも通知
 func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, webhookURL string) {
     if len(gifsToAdd) == 0 && len(gifsToModify) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
-        return // 差分がない場合は通知しない
+        return
     }
 
     hostname, err := os.Hostname()
@@ -103,7 +104,6 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
     var msg strings.Builder
     msg.WriteString(fmt.Sprintf("Configuration updated on %s:\n", hostname))
 
-    // 追加されたトンネル
     if len(gifsToAdd) > 0 {
         msg.WriteString("Added tunnels:\n")
         for _, config := range gifsToAdd {
@@ -111,7 +111,6 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
-    // 変更されたトンネル
     if len(gifsToModify) > 0 {
         msg.WriteString("Modified tunnels:\n")
         for _, config := range gifsToModify {
@@ -119,7 +118,6 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
-    // 削除されたトンネル
     if len(gifsToRemove) > 0 {
         msg.WriteString("Removed tunnels:\n")
         for _, config := range gifsToRemove {
@@ -127,10 +125,8 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
-    // slog経由でINFOレベルで出力（コンソールに表示）
     slog.Info(msg.String())
 
-    // Slackに直接送信（WARN以上とは別に処理）
     if webhookURL != "" {
         payload := map[string]string{
             "text": msg.String(),
@@ -244,7 +240,6 @@ func loadSettings(filename string) (Settings, error) {
         return Settings{}, fmt.Errorf("URL or PhysicalIface is not specified in settings file")
     }
 
-    // 環境変数が優先、未設定ならsettings.jsonの値を使用
     if envURL := os.Getenv("SLACK_WEBHOOK_URL"); envURL != "" {
         settings.SlackWebhookURL = envURL
     }
@@ -253,7 +248,7 @@ func loadSettings(filename string) (Settings, error) {
 }
 
 // fetchJSON は指定されたURLからJSONデータを取得し、重複と欠落をチェック
-func fetchJSON(url string) ([]TunnelConfig, error) {
+func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
         return nil, fmt.Errorf("failed to fetch JSON: %v", err)
@@ -270,7 +265,6 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
         return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
     }
 
-    // 有効な設定のみを収集
     var validConfigs []TunnelConfig
     tunnelIDs := make(map[string]bool)
     dstAddrs := make(map[string]bool)
@@ -286,12 +280,63 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing src_addr")
             continue
         }
-        if config.DstAddr == "" {
-            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing dst_addr")
-            continue
-        }
         if config.VlanID == "" {
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing vlan_id")
+            continue
+        }
+
+        // dst_addrとdst_hostnameの処理
+        gif := fmt.Sprintf("gif%s", config.TunnelID)
+        if config.DstAddr == "" && config.DstHostname != "" {
+            ips, err := net.LookupIP(config.DstHostname)
+            if err != nil {
+                // 名前解決に失敗した場合
+                if current, exists := currentGifs[gif]; exists {
+                    // 既存トンネルの場合は現在の設定を維持
+                    config.DstAddr = current.Dst
+                    slog.Warn("Failed to resolve dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr, "error", err)
+                } else {
+                    // 新規トンネルの場合はスキップ
+                    slog.Error("Skipping tunnel due to unresolvable dst_hostname", "index", i, "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "error", err)
+                    continue
+                }
+            } else {
+                // 名前解決成功
+                if current, exists := currentGifs[gif]; exists {
+                    // 既存トンネルで、現在のdst_addrが解決されたIPリストに含まれる場合、そのまま使用
+                    for _, ip := range ips {
+                        if ip.String() == current.Dst {
+                            config.DstAddr = current.Dst
+                            slog.Info("Keeping existing dst_addr from resolved IPs", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
+                            break
+                        }
+                    }
+                    // 含まれない場合、最初のIPを使用
+                    if config.DstAddr == "" {
+                        config.DstAddr = ips[0].String()
+                        slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
+                    }
+                } else {
+                    // 新規トンネルの場合、IPv6優先で選択
+                    isIPv6 := strings.Contains(config.SrcAddr, ":")
+                    for _, ip := range ips {
+                        if isIPv6 && ip.To4() == nil { // IPv6の場合
+                            config.DstAddr = ip.String()
+                            break
+                        } else if !isIPv6 && ip.To4() != nil { // IPv4の場合
+                            config.DstAddr = ip.String()
+                            break
+                        }
+                    }
+                    // 適切なIPが見つからない場合は最初のIPを使用
+                    if config.DstAddr == "" {
+                        config.DstAddr = ips[0].String()
+                    }
+                    slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
+                }
+            }
+        } else if config.DstAddr == "" && config.DstHostname == "" {
+            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing both dst_addr and dst_hostname")
             continue
         }
 
@@ -309,7 +354,6 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
             continue
         }
 
-        // 有効な設定として追加
         validConfigs = append(validConfigs, config)
         tunnelIDs[config.TunnelID] = true
         dstAddrs[config.DstAddr] = true
@@ -339,36 +383,30 @@ func membersEqual(m1, m2 []string) bool {
 // applyConfig は差分に基づいて設定を適用
 func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig, settings Settings,
     currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig) {
-    // 削除対象の収集
     vlanToRemove := make(map[string]bool)
     for vlan := range currentVLANs {
         vlanToRemove[vlan] = true
     }
 
-    // gifインターフェースの削除
     for gif := range gifsToRemove {
         if err := runCommand("ifconfig", gif, "destroy"); err != nil {
             slog.Error("Failed to remove gif interface", "gif", gif, "error", err)
         }
     }
 
-    // bridgeインターフェースの削除
     for bridge := range bridgesToRemove {
         if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
             slog.Error("Failed to remove bridge interface", "bridge", bridge, "error", err)
         }
     }
 
-    // gifインターフェースとVLAN、bridgeの追加と設定
     for _, config := range configs {
         gif := fmt.Sprintf("gif%s", config.TunnelID)
         bridge := fmt.Sprintf("bridge%s", config.TunnelID)
         vlanIface := fmt.Sprintf("%s.%s", settings.PhysicalIface, config.VlanID)
 
-        // VLANから削除対象を除外
         delete(vlanToRemove, vlanIface)
 
-        // gifインターフェース
         if current, exists := currentGifs[gif]; exists {
             if current.Src == config.SrcAddr && current.Dst == config.DstAddr && current.IsIPv6 == strings.Contains(config.SrcAddr, ":") {
                 slog.Debug("gif already exists with correct config, skipping", "gif", gif)
@@ -405,7 +443,6 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
             }
         }
 
-        // VLANの設定
         if vlanID, exists := currentVLANs[vlanIface]; exists && vlanID == config.VlanID {
             slog.Debug("VLAN already exists with correct config, skipping", "vlan", vlanIface)
         } else {
@@ -424,7 +461,6 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
             }
         }
 
-        // bridgeインターフェース
         expectedMembers := []string{gif, vlanIface}
         if current, exists := currentBridges[bridge]; exists {
             if membersEqual(current.Members, expectedMembers) {
@@ -450,7 +486,6 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
         }
     }
 
-    // 未使用のVLANインターフェースの削除
     for vlan := range vlanToRemove {
         if err := runCommand("ifconfig", vlan, "destroy"); err != nil {
             slog.Error("Failed to remove unused VLAN", "vlan", vlan, "error", err)
@@ -514,14 +549,12 @@ func main() {
     settingsFile := "settings.json"
     interval := 30 * time.Second
 
-    // 設定の読み込み（初回のみ）
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
         return
     }
 
-    // slogの設定（デフォルトでINFO以上を表示）
     slog.SetDefault(slog.New(&SlackHandler{
         Handler: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
             AddSource: false,
@@ -532,7 +565,7 @@ func main() {
 
     for {
         currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
-        configs, err := fetchJSON(settings.URL)
+        configs, err := fetchJSON(settings.URL, currentGifs)
         if err != nil {
             slog.Error("Failed to fetch JSON", "url", settings.URL, "error", err)
             time.Sleep(interval)
