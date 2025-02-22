@@ -61,7 +61,18 @@ func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
             hostname = "unknown"
         }
 
-        msg := fmt.Sprintf("[%s] %s: %s", hostname, r.Level.String(), r.Message)
+        // ログレベルを明示的に付与
+        var levelStr string
+        switch r.Level {
+        case slog.LevelWarn:
+            levelStr = "[WARN]"
+        case slog.LevelError:
+            levelStr = "[ERROR]"
+        default:
+            levelStr = "[unknown]"
+        }
+
+        msg := fmt.Sprintf("[%s] %s: %s", hostname, levelStr, r.Message)
         var attrs []slog.Attr
         r.Attrs(func(a slog.Attr) bool {
             attrs = append(attrs, a)
@@ -71,14 +82,32 @@ func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
             msg += fmt.Sprintf(" %s=%v", attr.Key, attr.Value)
         }
 
-        go sendToSlack(msg, h.Settings)
+        go sendToSlack(msg, r.Level, h.Settings)
     }
     return err
 }
 
-func sendToSlack(message string, settings *Settings) {
-    payload := make(map[string]string)
-    payload["text"] = message
+func sendToSlack(message string, level slog.Level, settings *Settings) {
+    // ログレベルに基づく色設定
+    var color string
+    switch level {
+    case slog.LevelWarn:
+        color = "#FF9900" // 黄色
+    case slog.LevelError:
+        color = "#FF0000" // 赤色
+    default:
+        color = "#36A64F" // 緑色（差分通知など）
+    }
+
+    attachment := map[string]interface{}{
+        "color": color,
+        "text":  message,
+    }
+
+    payload := make(map[string]interface{})
+    payload["attachments"] = []interface{}{attachment}
+
+    // チャンネル、ユーザ名、アイコンの条件付き追加
     if settings.SlackChannel != "" {
         payload["channel"] = settings.SlackChannel
     }
@@ -88,6 +117,7 @@ func sendToSlack(message string, settings *Settings) {
     if settings.SlackIconEmoji != "" {
         payload["icon_emoji"] = settings.SlackIconEmoji
     }
+
     payloadBytes, _ := json.Marshal(payload)
 
     resp, err := http.Post(settings.SlackWebhookURL, "application/json", bytes.NewBuffer(payloadBytes))
@@ -136,7 +166,7 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
     slog.Info(msg.String())
 
     if settings.SlackWebhookURL != "" {
-        go sendToSlack(msg.String(), settings)
+        go sendToSlack(msg.String(), slog.LevelInfo, settings) // 差分はINFOとして扱う
     }
 }
 
