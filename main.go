@@ -247,7 +247,6 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
-// fetchJSON は指定されたURLからJSONデータを取得し、重複と欠落をチェック
 func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
@@ -292,48 +291,53 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
             if err != nil {
                 // 名前解決に失敗した場合
                 if current, exists := currentGifs[gif]; exists {
-                    // 既存トンネルの場合は現在の設定を維持
                     config.DstAddr = current.Dst
                     slog.Warn("Failed to resolve dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr, "error", err)
                 } else {
-                    // 新規トンネルの場合はスキップ
                     slog.Error("Skipping tunnel due to unresolvable dst_hostname", "index", i, "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "error", err)
                     continue
                 }
             } else {
                 // 名前解決成功
+                isIPv6 := strings.Contains(config.SrcAddr, ":")
+                var resolvedAddr string
                 if current, exists := currentGifs[gif]; exists {
                     // 既存トンネルで、現在のdst_addrが解決されたIPリストに含まれる場合、そのまま使用
                     for _, ip := range ips {
                         if ip.String() == current.Dst {
-                            config.DstAddr = current.Dst
-                            slog.Info("Keeping existing dst_addr from resolved IPs", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
+                            resolvedAddr = current.Dst
+                            slog.Info("Keeping existing dst_addr from resolved IPs", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
                             break
                         }
                     }
-                    // 含まれない場合、最初のIPを使用
-                    if config.DstAddr == "" {
-                        config.DstAddr = ips[0].String()
-                        slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
-                    }
-                } else {
-                    // 新規トンネルの場合、IPv6優先で選択
-                    isIPv6 := strings.Contains(config.SrcAddr, ":")
-                    for _, ip := range ips {
-                        if isIPv6 && ip.To4() == nil { // IPv6の場合
-                            config.DstAddr = ip.String()
-                            break
-                        } else if !isIPv6 && ip.To4() != nil { // IPv4の場合
-                            config.DstAddr = ip.String()
-                            break
-                        }
-                    }
-                    // 適切なIPが見つからない場合は最初のIPを使用
-                    if config.DstAddr == "" {
-                        config.DstAddr = ips[0].String()
-                    }
-                    slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr)
                 }
+                // 既存アドレスが見つからない場合、または新規トンネルの場合
+                if resolvedAddr == "" {
+                    for _, ip := range ips {
+                        if isIPv6 && ip.To4() == nil { // IPv6を優先
+                            resolvedAddr = ip.String()
+                            break
+                        } else if !isIPv6 && ip.To4() != nil { // IPv4を優先
+                            resolvedAddr = ip.String()
+                            break
+                        }
+                    }
+                    if resolvedAddr == "" {
+                        // 適切なIPが見つからない場合
+                        if current, exists := currentGifs[gif]; exists {
+                            // 既存トンネルの場合、現在のdst_addrを維持
+                            resolvedAddr = current.Dst
+                            slog.Warn("No suitable IP found for dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr, "isIPv6", isIPv6)
+                        } else {
+                            // 新規トンネルの場合、スキップ
+                            slog.Error("Skipping tunnel due to no suitable IP for dst_hostname", "index", i, "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "isIPv6", isIPv6)
+                            continue
+                        }
+                    } else {
+                        slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
+                    }
+                }
+                config.DstAddr = resolvedAddr
             }
         } else if config.DstAddr == "" && config.DstHostname == "" {
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing both dst_addr and dst_hostname")
