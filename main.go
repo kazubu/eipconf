@@ -89,7 +89,7 @@ func sendToSlack(r slog.Record, webhookURL string) {
     defer resp.Body.Close()
 }
 
-// notifyConfigDiff は差分をSlackに通知
+// notifyConfigDiff は差分をslog経由でINFOとして出力し、Slackにも通知
 func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, webhookURL string) {
     if len(gifsToAdd) == 0 && len(gifsToModify) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
         return // 差分がない場合は通知しない
@@ -101,7 +101,7 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
     }
 
     var msg strings.Builder
-    msg.WriteString(fmt.Sprintf("[%s] Configuration updated:\n", hostname))
+    msg.WriteString(fmt.Sprintf("Configuration updated on %s:\n", hostname))
 
     // 追加されたトンネル
     if len(gifsToAdd) > 0 {
@@ -127,18 +127,24 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
-    payload := map[string]string{
-        "text": msg.String(),
-    }
-    payloadBytes, _ := json.Marshal(payload)
+    // slog経由でINFOレベルで出力（コンソールに表示）
+    slog.Info(msg.String())
 
-    // 非同期でSlackに送信
-    resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "Failed to send config diff to Slack: %v\n", err)
-        return
+    // Slackに直接送信（WARN以上とは別に処理）
+    if webhookURL != "" {
+        payload := map[string]string{
+            "text": msg.String(),
+        }
+        payloadBytes, _ := json.Marshal(payload)
+        go func() {
+            resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "Failed to send config diff to Slack: %v\n", err)
+                return
+            }
+            defer resp.Body.Close()
+        }()
     }
-    defer resp.Body.Close()
 }
 
 // runCommand はコマンドを実行し、エラーがあれば再試行する
@@ -519,7 +525,7 @@ func main() {
     slog.SetDefault(slog.New(&SlackHandler{
         Handler: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
             AddSource: false,
-            Level:     slog.LevelInfo, // DEBUGはデフォルトで非表示
+            Level:     slog.LevelInfo,
         }),
         SlackWebhookURL: settings.SlackWebhookURL,
     }))
@@ -534,10 +540,7 @@ func main() {
         }
 
         gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
-        // 差分があればSlackに通知
-        if settings.SlackWebhookURL != "" {
-            notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, settings.SlackWebhookURL)
-        }
+        notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, settings.SlackWebhookURL)
         applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
 
         slog.Info("Configuration check completed", "sleep", interval)
