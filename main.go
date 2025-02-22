@@ -141,7 +141,7 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
-// fetchJSON は指定されたURLからJSONデータを取得
+// fetchJSON は指定されたURLからJSONデータを取得し、重複をチェック
 func fetchJSON(url string) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
@@ -158,6 +158,26 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
     if err := json.Unmarshal(body, &configs); err != nil {
         return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
     }
+
+    // 重複チェック
+    tunnelIDs := make(map[string]bool)
+    dstAddrs := make(map[string]bool)
+    vlanIDs := make(map[string]bool)
+    for i, config := range configs {
+        if tunnelIDs[config.TunnelID] {
+            return nil, fmt.Errorf("duplicate tunnel_id found: %s at index %d", config.TunnelID, i)
+        }
+        if dstAddrs[config.DstAddr] {
+            return nil, fmt.Errorf("duplicate dst_addr found: %s at index %d", config.DstAddr, i)
+        }
+        if vlanIDs[config.VlanID] {
+            return nil, fmt.Errorf("duplicate vlan_id found: %s at index %d", config.VlanID, i)
+        }
+        tunnelIDs[config.TunnelID] = true
+        dstAddrs[config.DstAddr] = true
+        vlanIDs[config.VlanID] = true
+    }
+
     return configs, nil
 }
 
