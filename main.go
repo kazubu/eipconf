@@ -50,7 +50,6 @@ func runCommand(cmd string, args ...string) error {
             return nil
         }
         outputStr := string(output)
-        // "already exists"エラーは無視して成功扱い
         if strings.Contains(outputStr, "already exists") {
             log.Printf("Interface already exists, skipping creation: %s %v", cmd, args)
             return nil
@@ -78,27 +77,22 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
 
     lines := strings.Split(string(output), "\n")
     for _, line := range lines {
-        // gifインターフェース
         if strings.Contains(line, "gif") {
             gifName := regexp.MustCompile(`gif\d+`).FindString(line)
             if gifName != "" {
                 detail, _ := exec.Command("ifconfig", gifName).Output()
                 detailStr := string(detail)
-                // IPv4トンネル
                 srcDstIPv4 := regexp.MustCompile(`tunnel inet (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
-                // IPv6トンネル
                 srcDstIPv6 := regexp.MustCompile(`tunnel inet6 (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
                 if len(srcDstIPv4) == 3 {
                     gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv4[1], Dst: srcDstIPv4[2], Vlan: "", IsIPv6: false}
                 } else if len(srcDstIPv6) == 3 {
                     gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv6[1], Dst: srcDstIPv6[2], Vlan: "", IsIPv6: true}
                 } else {
-                    // tunnel設定がない場合もインターフェースを記録
                     gifInterfaces[gifName] = InterfaceConfig{Src: "", Dst: "", Vlan: "", IsIPv6: false}
                 }
             }
         }
-        // bridgeインターフェース
         if strings.Contains(line, "bridge") {
             bridgeName := regexp.MustCompile(`bridge\d+`).FindString(line)
             if bridgeName != "" {
@@ -111,7 +105,6 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
                 bridgeInterfaces[bridgeName] = BridgeConfig{Members: memberList}
             }
         }
-        // VLANインターフェース
         if regexp.MustCompile(`\w+\.\d+`).MatchString(line) {
             vlanName := regexp.MustCompile(`\w+\.\d+`).FindString(line)
             if vlanName != "" {
@@ -190,10 +183,11 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
                 continue
             }
             // 設定が異なる場合やtunnel設定がない場合は上書き
-            tunnelArgs := []string{gif, "tunnel", config.Src, config.Dst}
+            tunnelArgs := []string{gif}
             if config.IsIPv6 {
                 tunnelArgs = append(tunnelArgs, "inet6")
             }
+            tunnelArgs = append(tunnelArgs, "tunnel", config.Src, config.Dst)
             if err := runCommand("ifconfig", tunnelArgs...); err != nil {
                 log.Printf("Failed to configure tunnel for %s: %v", gif, err)
                 continue
@@ -208,10 +202,11 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
             log.Printf("Failed to create gif %s: %v", gif, err)
             continue
         }
-        tunnelArgs := []string{gif, "tunnel", config.Src, config.Dst}
+        tunnelArgs := []string{gif}
         if config.IsIPv6 {
             tunnelArgs = append(tunnelArgs, "inet6")
         }
+        tunnelArgs = append(tunnelArgs, "tunnel", config.Src, config.Dst)
         if err := runCommand("ifconfig", tunnelArgs...); err != nil {
             log.Printf("Failed to configure tunnel for %s: %v", gif, err)
             continue
