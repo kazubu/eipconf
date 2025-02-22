@@ -23,6 +23,8 @@ type Settings struct {
     SlackChannel    string `json:"slack_channel,omitempty"`
     SlackUsername   string `json:"slack_username,omitempty"`
     SlackIconEmoji  string `json:"slack_icon_emoji,omitempty"`
+    LogLevel        string `json:"log_level,omitempty"`
+    LogFile         string `json:"log_file,omitempty"`
 }
 
 type TunnelConfig struct {
@@ -46,7 +48,6 @@ type BridgeConfig struct {
     TunnelID string
 }
 
-// SlackHandler はログをSlackに送信するカスタムハンドラ
 type SlackHandler struct {
     slog.Handler
     Settings *Settings
@@ -132,10 +133,8 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
-    // コンソールにINFOログとして出力
     slog.Info(msg.String())
 
-    // Slackが設定されている場合、Slackに送信
     if settings.SlackWebhookURL != "" {
         go sendToSlack(msg.String(), settings)
     }
@@ -583,11 +582,46 @@ func main() {
         return
     }
 
+    // ログレベルの設定
+    var logLevel slog.Level
+    switch strings.ToUpper(settings.LogLevel) {
+    case "DEBUG":
+        logLevel = slog.LevelDebug
+    case "WARN":
+        logLevel = slog.LevelWarn
+    case "ERROR":
+        logLevel = slog.LevelError
+    case "INFO", "":
+        logLevel = slog.LevelInfo // デフォルト
+    default:
+        fmt.Fprintf(os.Stderr, "Invalid log_level: %s, defaulting to INFO\n", settings.LogLevel)
+        logLevel = slog.LevelInfo
+    }
+
+    // ハンドラの設定
+    consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+        AddSource: false,
+        Level:     logLevel,
+    })
+    var handler slog.Handler = consoleHandler
+
+    // ログファイルが指定されている場合、ファイルハンドラを追加
+    if settings.LogFile != "" {
+        logFile, err := os.OpenFile(settings.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to open log file %s: %v, using console only\n", settings.LogFile, err)
+        } else {
+            fileHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{
+                AddSource: false,
+                Level:     logLevel,
+            })
+            // コンソールとファイルの両方にログを出力するマルチハンドラ
+            handler = slogmultiHandler{consoleHandler, fileHandler}
+        }
+    }
+
     slog.SetDefault(slog.New(&SlackHandler{
-        Handler: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-            AddSource: false,
-            Level:     slog.LevelInfo,
-        }),
+        Handler:  handler,
         Settings: &settings,
     }))
 
@@ -607,4 +641,41 @@ func main() {
         slog.Info("Configuration check completed", "sleep", interval)
         time.Sleep(interval)
     }
+}
+
+// slogmultiHandler は複数のハンドラを組み合わせるための簡易実装
+type slogmultiHandler []slog.Handler
+
+func (h slogmultiHandler) Handle(ctx context.Context, r slog.Record) error {
+    for _, handler := range h {
+        if err := handler.Handle(ctx, r); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+func (h slogmultiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+    for _, handler := range h {
+        if handler.Enabled(ctx, level) {
+            return true
+        }
+    }
+    return false
+}
+
+func (h slogmultiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+    handlers := make([]slog.Handler, len(h))
+    for i, handler := range h {
+        handlers[i] = handler.WithAttrs(attrs)
+    }
+    return slogmultiHandler(handlers)
+}
+
+func (h slogmultiHandler) WithGroup(name string) slog.Handler {
+    handlers := make([]slog.Handler, len(h))
+    for i, handler := range h {
+        handlers[i] = handler.WithGroup(name)
+    }
+    return slogmultiHandler(handlers)
 }

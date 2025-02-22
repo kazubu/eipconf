@@ -1,6 +1,6 @@
 # EIP Configuration Tool
 
-This tool automates the configuration of GIF tunnels, VLANs, and bridges on a network interface based on a JSON configuration fetched from a specified URL. It supports dynamic updates, DNS resolution for destination hostnames, Slack notifications, and MTU settings for new interfaces.
+This tool automates the configuration of GIF tunnels, VLANs, and bridges on a network interface based on a JSON configuration fetched from a specified URL. It supports dynamic updates, DNS resolution for destination hostnames, customizable Slack notifications, and MTU settings for new interfaces.
 
 ## Features
 
@@ -8,8 +8,9 @@ This tool automates the configuration of GIF tunnels, VLANs, and bridges on a ne
 - **VLAN Configuration**: Manages VLAN interfaces tied to a physical interface.
 - **Bridge Management**: Configures bridges with GIF and VLAN members.
 - **DNS Resolution**: Resolves `dst_hostname` to IP addresses, prioritizing IPv6 if `src_addr` is IPv6.
-- **Slack Notifications**: Sends `WARN` and `ERROR` logs, plus configuration diffs, to a Slack channel.
+- **Slack Notifications**: Sends `WARN` and `ERROR` logs, plus configuration diffs, to a Slack channel with customizable channel, username, and icon.
 - **MTU Configuration**: Sets MTU to 1500 for newly created GIF tunnels and bridges.
+- **Logging**: Configurable log levels (DEBUG, INFO, WARN, ERROR) and optional log file output.
 - **Continuous Monitoring**: Periodically fetches and applies the configuration (default: every 30 seconds).
 
 ## Prerequisites
@@ -41,13 +42,23 @@ Create a `settings.json` file in the working directory with the following struct
 {
     "url": "http://example.com/config.json",
     "physical_iface": "em2",
-    "slack_webhook_url": "https://hooks.slack.com/services/xxx/yyy/zzz"
+    "slack_webhook_url": "https://hooks.slack.com/services/xxx/yyy/zzz",
+    "slack_channel": "#network-updates",
+    "slack_username": "EIPBot",
+    "slack_icon_emoji": ":gear:",
+    "log_level": "DEBUG",
+    "log_file": "/var/log/eipconf.log"
 }
 ```
 
-- `url`: URL to fetch the tunnel configuration JSON.
-- `physical_iface`: Physical network interface (e.g., `em2`) for VLANs.
-- `slack_webhook_url`: Optional Slack Webhook URL for notifications (can also be set via `SLACK_WEBHOOK_URL` environment variable).
+- `url`: URL to fetch the tunnel configuration JSON (required).
+- `physical_iface`: Physical network interface (e.g., `em2`) for VLANs (required).
+- `slack_webhook_url`: Slack Webhook URL for notifications (optional, can be set via `SLACK_WEBHOOK_URL` environment variable).
+- `slack_channel`: Slack channel name (e.g., `#network-updates`, optional).
+- `slack_username`: Slack username (e.g., `EIPBot`, optional).
+- `slack_icon_emoji`: Slack icon emoji (e.g., `:gear:`, optional).
+- `log_level`: Log level (`DEBUG`, `INFO`, `WARN`, `ERROR`; optional, defaults to `INFO`).
+- `log_file`: Path to log file (e.g., `/var/log/eipconf.log`; optional, logs to console if unspecified).
 
 ### `config.json` (Remote)
 
@@ -93,22 +104,24 @@ The tool will:
 - Fetch `config.json` from the specified URL every 30 seconds.
 - Apply or update GIF tunnels, VLANs, and bridges as needed.
 - Set MTU to 1500 for newly created GIF tunnels and bridges.
-- Send Slack notifications for configuration diffs and errors (`WARN` or `ERROR`).
+- Output logs to console and/or a file based on `log_level` and `log_file`.
+- Send Slack notifications for configuration diffs and `WARN`/`ERROR` logs.
 
 ## Logging
 
-- **INFO**: Configuration updates, command successes, and periodic checks (visible in console).
-- **DEBUG**: Detailed operations (e.g., skipping unchanged interfaces, keeping existing `dst_addr`)—not shown by default.
+- **DEBUG**: Detailed operations (e.g., skipping unchanged interfaces, keeping existing `dst_addr`).
+- **INFO**: Configuration updates, command successes, and periodic checks (not sent to Slack).
 - **WARN**: Non-critical issues (e.g., DNS resolution failures with fallback to existing `dst_addr`)—sent to Slack.
 - **ERROR**: Critical failures (e.g., unresolvable hostnames for new tunnels, command failures)—sent to Slack.
 
-To see `DEBUG` logs, modify the log level in the source code (`slog.HandlerOptions{Level: slog.LevelInfo}` to `Level: slog.LevelDebug`) and rebuild.
+- **Log Level**: Set via `log_level` in `settings.json` (default: `INFO`).
+- **Log File**: If `log_file` is specified, logs at or above the configured level are written to the file in addition to the console.
 
 ## Notes
 
 - **MTU**: Only set to 1500 for newly created interfaces. Existing interfaces retain their current MTU.
 - **DNS Resolution**: If `dst_hostname` fails to resolve or lacks a suitable IP (IPv6/IPv4 based on `src_addr`), existing tunnels keep their `dst_addr`, while new tunnels are skipped.
-- **Slack**: Notifications include hostname, log level, and message details for `WARN`/`ERROR`, plus configuration diffs.
+- **Slack**: Notifications include configuration diffs and `WARN`/`ERROR` logs. `slack_channel`, `slack_username`, and `slack_icon_emoji` are optional; if unset, they are omitted from the payload, using the Webhook's defaults.
 
 ## Contributing
 
