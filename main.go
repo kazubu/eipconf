@@ -90,8 +90,8 @@ func sendToSlack(r slog.Record, webhookURL string) {
 }
 
 // notifyConfigDiff は差分をSlackに通知
-func notifyConfigDiff(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, webhookURL string) {
-    if len(gifsToAdd) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
+func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, webhookURL string) {
+    if len(gifsToAdd) == 0 && len(gifsToModify) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
         return // 差分がない場合は通知しない
     }
 
@@ -107,6 +107,14 @@ func notifyConfigDiff(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridge
     if len(gifsToAdd) > 0 {
         msg.WriteString("Added tunnels:\n")
         for _, config := range gifsToAdd {
+            msg.WriteString(fmt.Sprintf("- tunnel_id=%s, src_addr=%s, dst_addr=%s, vlan_id=%s\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+        }
+    }
+
+    // 変更されたトンネル
+    if len(gifsToModify) > 0 {
+        msg.WriteString("Modified tunnels:\n")
+        for _, config := range gifsToModify {
             msg.WriteString(fmt.Sprintf("- tunnel_id=%s, src_addr=%s, dst_addr=%s, vlan_id=%s\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
         }
     }
@@ -323,7 +331,7 @@ func membersEqual(m1, m2 []string) bool {
 }
 
 // applyConfig は差分に基づいて設定を適用
-func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig, settings Settings,
+func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig, settings Settings,
     currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig) {
     // 削除対象の収集
     vlanToRemove := make(map[string]bool)
@@ -446,7 +454,7 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
 
 // calculateDiff は現在の状態とJSONデータの差分を計算
 func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[string]BridgeConfig, configs []TunnelConfig, physicalIface string) (
-    map[string]InterfaceConfig, map[string]InterfaceConfig, map[string]BridgeConfig, map[string]BridgeConfig) {
+    gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig) {
     jsonGifs := make(map[string]InterfaceConfig)
     jsonBridges := make(map[string]BridgeConfig)
 
@@ -461,13 +469,18 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
         }
     }
 
-    gifsToAdd := make(map[string]InterfaceConfig)
-    gifsToRemove := make(map[string]InterfaceConfig)
-    bridgesToAdd := make(map[string]BridgeConfig)
-    bridgesToRemove := make(map[string]BridgeConfig)
+    gifsToAdd = make(map[string]InterfaceConfig)
+    gifsToModify = make(map[string]InterfaceConfig)
+    gifsToRemove = make(map[string]InterfaceConfig)
+    bridgesToAdd = make(map[string]BridgeConfig)
+    bridgesToRemove = make(map[string]BridgeConfig)
 
     for k, v := range jsonGifs {
-        if _, exists := currentGifs[k]; !exists || (currentGifs[k].Src != v.Src || currentGifs[k].Dst != v.Dst || currentGifs[k].IsIPv6 != v.IsIPv6) {
+        if current, exists := currentGifs[k]; exists {
+            if current.Src != v.Src || current.Dst != v.Dst || current.IsIPv6 != v.IsIPv6 {
+                gifsToModify[k] = v
+            }
+        } else {
             gifsToAdd[k] = v
         }
     }
@@ -487,7 +500,7 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
         }
     }
 
-    return gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove
+    return
 }
 
 // main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
@@ -520,12 +533,12 @@ func main() {
             continue
         }
 
-        gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
+        gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
         // 差分があればSlackに通知
         if settings.SlackWebhookURL != "" {
-            notifyConfigDiff(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, settings.SlackWebhookURL)
+            notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, settings.SlackWebhookURL)
         }
-        applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
+        applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
 
         slog.Info("Configuration check completed", "sleep", interval)
         time.Sleep(interval)
