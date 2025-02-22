@@ -32,13 +32,13 @@ type InterfaceConfig struct {
     Dst      string
     Vlan     string
     IsIPv6   bool
-    TunnelID string // 生成元となるtunnel_idを記録
+    TunnelID string
 }
 
 // BridgeConfig はブリッジの設定を表す構造体
 type BridgeConfig struct {
     Members  []string
-    TunnelID string // 生成元となるtunnel_idを記録
+    TunnelID string
 }
 
 // runCommand はコマンドを実行し、エラーがあれば再試行する
@@ -78,7 +78,6 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
 
     lines := strings.Split(string(output), "\n")
     for _, line := range lines {
-        // gifインターフェース
         if strings.HasPrefix(line, "gif") {
             gifName := regexp.MustCompile(`gif\d+`).FindString(line)
             if gifName != "" {
@@ -96,7 +95,6 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
                 }
             }
         }
-        // bridgeインターフェース
         if strings.HasPrefix(line, "bridge") {
             bridgeName := regexp.MustCompile(`bridge\d+`).FindString(line)
             if bridgeName != "" {
@@ -110,7 +108,6 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
                 bridgeInterfaces[bridgeName] = BridgeConfig{Members: memberList, TunnelID: tunnelID}
             }
         }
-        // VLANインターフェース
         if regexp.MustCompile(`\w+\.\d+`).MatchString(line) {
             vlanName := regexp.MustCompile(`\w+\.\d+`).FindString(line)
             if vlanName != "" {
@@ -162,6 +159,23 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
         return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
     }
     return configs, nil
+}
+
+// membersEqual は2つのメンバーリストが順序に関係なく一致するか確認
+func membersEqual(m1, m2 []string) bool {
+    if len(m1) != len(m2) {
+        return false
+    }
+    m1Map := make(map[string]bool)
+    for _, m := range m1 {
+        m1Map[m] = true
+    }
+    for _, m := range m2 {
+        if !m1Map[m] {
+            return false
+        }
+    }
+    return true
 }
 
 // applyConfig は差分に基づいて設定を適用
@@ -253,8 +267,9 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
         }
 
         // bridgeインターフェース
+        expectedMembers := []string{gif, vlanIface}
         if current, exists := currentBridges[bridge]; exists {
-            if len(current.Members) == 2 && current.Members[0] == gif && current.Members[1] == vlanIface {
+            if membersEqual(current.Members, expectedMembers) {
                 log.Printf("bridge %s already exists with correct config, skipping", bridge)
                 continue
             }
@@ -267,7 +282,7 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
             log.Printf("Failed to create bridge %s: %v", bridge, err)
             continue
         }
-        for _, member := range []string{gif, vlanIface} {
+        for _, member := range expectedMembers {
             if err := runCommand("ifconfig", bridge, "addm", member); err != nil {
                 log.Printf("Failed to add member %s to bridge %s: %v", member, bridge, err)
             }
@@ -318,13 +333,8 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
         }
     }
     for k, v := range jsonBridges {
-        if _, exists := currentBridges[k]; !exists {
+        if _, exists := currentBridges[k]; !exists || !membersEqual(currentBridges[k].Members, v.Members) {
             bridgesToAdd[k] = v
-        } else {
-            current := currentBridges[k]
-            if len(current.Members) != len(v.Members) || current.Members[0] != v.Members[0] || current.Members[1] != v.Members[1] {
-                bridgesToAdd[k] = v
-            }
         }
     }
     for k, v := range currentBridges {
