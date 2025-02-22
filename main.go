@@ -29,9 +29,10 @@ type TunnelConfig struct {
 
 // InterfaceConfig はインターフェースの設定を表す構造体
 type InterfaceConfig struct {
-    Src   string
-    Dst   string
-    Vlan  string
+    Src    string
+    Dst    string
+    Vlan   string
+    IsIPv6 bool
 }
 
 // BridgeConfig はブリッジの設定を表す構造体
@@ -48,7 +49,13 @@ func runCommand(cmd string, args ...string) error {
             log.Printf("Command succeeded: %s %v", cmd, args)
             return nil
         }
-        log.Printf("Command failed: %s %v, Error: %s", cmd, args, output)
+        outputStr := string(output)
+        // "already exists"エラーは無視して成功扱い
+        if strings.Contains(outputStr, "already exists") {
+            log.Printf("Interface already exists, skipping creation: %s %v", cmd, args)
+            return nil
+        }
+        log.Printf("Command failed: %s %v, Error: %s", cmd, args, outputStr)
         if attempt < 2 {
             log.Printf("Retrying in 1 second...")
             time.Sleep(time.Second)
@@ -57,29 +64,41 @@ func runCommand(cmd string, args ...string) error {
     return fmt.Errorf("command failed after 3 attempts: %s %v", cmd, args)
 }
 
-// getCurrentInterfaces は現在のgifおよびbridgeインターフェースを取得
-func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig) {
+// getCurrentInterfaces は現在のgif、VLAN、bridgeインターフェースを取得
+func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig, map[string]string) {
     gifInterfaces := make(map[string]InterfaceConfig)
     bridgeInterfaces := make(map[string]BridgeConfig)
+    vlanInterfaces := make(map[string]string)
 
     output, err := exec.Command("ifconfig", "-a").Output()
     if err != nil {
         log.Printf("Failed to get current interfaces: %v", err)
-        return gifInterfaces, bridgeInterfaces
+        return gifInterfaces, bridgeInterfaces, vlanInterfaces
     }
 
     lines := strings.Split(string(output), "\n")
     for _, line := range lines {
+        // gifインターフェース
         if strings.Contains(line, "gif") {
             gifName := regexp.MustCompile(`gif\d+`).FindString(line)
             if gifName != "" {
                 detail, _ := exec.Command("ifconfig", gifName).Output()
-                srcDst := regexp.MustCompile(`tunnel inet (\S+) --> (\S+)`).FindStringSubmatch(string(detail))
-                if len(srcDst) == 3 {
-                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDst[1], Dst: srcDst[2], Vlan: ""}
+                detailStr := string(detail)
+                // IPv4トンネル
+                srcDstIPv4 := regexp.MustCompile(`tunnel inet (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
+                // IPv6トンネル
+                srcDstIPv6 := regexp.MustCompile(`tunnel inet6 (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
+                if len(srcDstIPv4) == 3 {
+                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv4[1], Dst: srcDstIPv4[2], Vlan: "", IsIPv6: false}
+                } else if len(srcDstIPv6) == 3 {
+                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv6[1], Dst: srcDstIPv6[2], Vlan: "", IsIPv6: true}
+                } else {
+                    // tunnel設定がない場合もインターフェースを記録
+                    gifInterfaces[gifName] = InterfaceConfig{Src: "", Dst: "", Vlan: "", IsIPv6: false}
                 }
             }
         }
+        // bridgeインターフェース
         if strings.Contains(line, "bridge") {
             bridgeName := regexp.MustCompile(`bridge\d+`).FindString(line)
             if bridgeName != "" {
@@ -92,8 +111,19 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
                 bridgeInterfaces[bridgeName] = BridgeConfig{Members: memberList}
             }
         }
+        // VLANインターフェース
+        if regexp.MustCompile(`\w+\.\d+`).MatchString(line) {
+            vlanName := regexp.MustCompile(`\w+\.\d+`).FindString(line)
+            if vlanName != "" {
+                detail, _ := exec.Command("ifconfig", vlanName).Output()
+                vlanID := regexp.MustCompile(`vlan: (\d+)`).FindStringSubmatch(string(detail))
+                if len(vlanID) == 2 {
+                    vlanInterfaces[vlanName] = vlanID[1]
+                }
+            }
+        }
     }
-    return gifInterfaces, bridgeInterfaces
+    return gifInterfaces, bridgeInterfaces, vlanInterfaces
 }
 
 // loadSettings はローカルの設定ファイルからURLを読み込む
@@ -136,7 +166,8 @@ func fetchJSON(url string) ([]TunnelConfig, error) {
 }
 
 // applyConfig は差分に基づいて設定を適用
-func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig) {
+func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig,
+    currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig) {
     // gifインターフェースの削除
     for gif := range gifsToRemove {
         if err := runCommand("ifconfig", gif, "destroy"); err != nil {
@@ -153,11 +184,35 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
 
     // gifインターフェースの追加と設定
     for gif, config := range gifsToAdd {
+        if current, exists := currentGifs[gif]; exists {
+            if current.Src == config.Src && current.Dst == config.Dst && current.IsIPv6 == config.IsIPv6 {
+                log.Printf("gif %s already exists with correct config, skipping", gif)
+                continue
+            }
+            // 設定が異なる場合やtunnel設定がない場合は上書き
+            tunnelArgs := []string{gif, "tunnel", config.Src, config.Dst}
+            if config.IsIPv6 {
+                tunnelArgs = append(tunnelArgs, "inet6")
+            }
+            if err := runCommand("ifconfig", tunnelArgs...); err != nil {
+                log.Printf("Failed to configure tunnel for %s: %v", gif, err)
+                continue
+            }
+            if err := runCommand("ifconfig", gif, "up"); err != nil {
+                log.Printf("Failed to bring up gif %s: %v", gif, err)
+            }
+            continue
+        }
+        // 新規作成
         if err := runCommand("ifconfig", gif, "create"); err != nil {
             log.Printf("Failed to create gif %s: %v", gif, err)
             continue
         }
-        if err := runCommand("ifconfig", gif, "tunnel", config.Src, config.Dst); err != nil {
+        tunnelArgs := []string{gif, "tunnel", config.Src, config.Dst}
+        if config.IsIPv6 {
+            tunnelArgs = append(tunnelArgs, "inet6")
+        }
+        if err := runCommand("ifconfig", tunnelArgs...); err != nil {
             log.Printf("Failed to configure tunnel for %s: %v", gif, err)
             continue
         }
@@ -166,9 +221,19 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
         }
     }
 
-    // VLANの設定（物理インターフェース名を動的に取得）
+    // VLANの設定
     for _, config := range configs {
         vlanIface := fmt.Sprintf("%s.%s", config.PhysicalIface, config.VlanID)
+        if vlanID, exists := currentVLANs[vlanIface]; exists && vlanID == config.VlanID {
+            log.Printf("VLAN %s already exists with correct config, skipping", vlanIface)
+            continue
+        }
+        if _, exists := currentVLANs[vlanIface]; exists {
+            if err := runCommand("ifconfig", vlanIface, "destroy"); err != nil {
+                log.Printf("Failed to remove VLAN %s for reconfiguration: %v", vlanIface, err)
+                continue
+            }
+        }
         if err := runCommand("ifconfig", vlanIface, "create"); err != nil {
             log.Printf("Failed to create VLAN %s: %v", vlanIface, err)
             continue
@@ -180,6 +245,32 @@ func applyConfig(gifsToAdd, gifsToRemove map[string]InterfaceConfig, bridgesToAd
 
     // bridgeインターフェースの追加と設定
     for bridge, config := range bridgesToAdd {
+        if current, exists := currentBridges[bridge]; exists {
+            if len(current.Members) == len(config.Members) {
+                memberMatch := true
+                for _, m := range config.Members {
+                    found := false
+                    for _, cm := range current.Members {
+                        if m == cm {
+                            found = true
+                            break
+                        }
+                    }
+                    if !found {
+                        memberMatch = false
+                        break
+                    }
+                }
+                if memberMatch {
+                    log.Printf("bridge %s already exists with correct config, skipping", bridge)
+                    continue
+                }
+            }
+            if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
+                log.Printf("Failed to remove bridge %s for reconfiguration: %v", bridge, err)
+                continue
+            }
+        }
         if err := runCommand("ifconfig", bridge, "create"); err != nil {
             log.Printf("Failed to create bridge %s: %v", bridge, err)
             continue
@@ -202,7 +293,8 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     jsonBridges := make(map[string]BridgeConfig)
 
     for _, config := range configs {
-        jsonGifs[config.Gif] = InterfaceConfig{Src: config.SrcAddr, Dst: config.DstAddr, Vlan: config.VlanID}
+        isIPv6 := strings.Contains(config.SrcAddr, ":") || strings.Contains(config.DstAddr, ":")
+        jsonGifs[config.Gif] = InterfaceConfig{Src: config.SrcAddr, Dst: config.DstAddr, Vlan: config.VlanID, IsIPv6: isIPv6}
         jsonBridges[config.Bridge] = BridgeConfig{Members: []string{config.Gif, fmt.Sprintf("%s.%s", config.PhysicalIface, config.VlanID)}}
     }
 
@@ -212,7 +304,7 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     bridgesToRemove := make(map[string]BridgeConfig)
 
     for k, v := range jsonGifs {
-        if _, exists := currentGifs[k]; !exists {
+        if _, exists := currentGifs[k]; !exists || (currentGifs[k].Src != v.Src || currentGifs[k].Dst != v.Dst || currentGifs[k].IsIPv6 != v.IsIPv6) {
             gifsToAdd[k] = v
         }
     }
@@ -224,6 +316,25 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     for k, v := range jsonBridges {
         if _, exists := currentBridges[k]; !exists {
             bridgesToAdd[k] = v
+        } else {
+            current := currentBridges[k]
+            if len(current.Members) != len(v.Members) {
+                bridgesToAdd[k] = v
+            } else {
+                for _, m := range v.Members {
+                    found := false
+                    for _, cm := range current.Members {
+                        if m == cm {
+                            found = true
+                            break
+                        }
+                    }
+                    if !found {
+                        bridgesToAdd[k] = v
+                        break
+                    }
+                }
+            }
         }
     }
     for k, v := range currentBridges {
@@ -237,11 +348,10 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 
 // main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
 func main() {
-    settingsFile := "settings.json" // ローカル設定ファイル
-    interval := 30 * time.Second    // フェッチ間隔
+    settingsFile := "settings.json"
+    interval := 30 * time.Second
 
     for {
-        // ローカル設定ファイルからURLを読み込み
         settings, err := loadSettings(settingsFile)
         if err != nil {
             log.Printf("Failed to load settings: %v", err)
@@ -249,10 +359,7 @@ func main() {
             continue
         }
 
-        // 現在のインターフェース状態を取得
-        currentGifs, currentBridges := getCurrentInterfaces()
-
-        // URLからJSONデータをフェッチ
+        currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
         configs, err := fetchJSON(settings.URL)
         if err != nil {
             log.Printf("Failed to fetch JSON from %s: %v", settings.URL, err)
@@ -260,9 +367,8 @@ func main() {
             continue
         }
 
-        // 差分を計算し設定を適用
         gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs)
-        applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, configs)
+        applyConfig(gifsToAdd, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, currentGifs, currentVLANs, currentBridges)
 
         log.Printf("Configuration check completed. Sleeping for %v...", interval)
         time.Sleep(interval)
