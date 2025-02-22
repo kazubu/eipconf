@@ -16,14 +16,15 @@ import (
     "time"
 )
 
-// Settings はローカル設定ファイルから読み込む構造体
 type Settings struct {
     URL             string `json:"url"`
     PhysicalIface   string `json:"physical_iface"`
     SlackWebhookURL string `json:"slack_webhook_url,omitempty"`
+    SlackChannel    string `json:"slack_channel,omitempty"`
+    SlackUsername   string `json:"slack_username,omitempty"`
+    SlackIconEmoji  string `json:"slack_icon_emoji,omitempty"`
 }
 
-// TunnelConfig はJSONから読み込むトンネル設定を表す構造体
 type TunnelConfig struct {
     TunnelID    string `json:"tunnel_id"`
     SrcAddr     string `json:"src_addr"`
@@ -32,7 +33,6 @@ type TunnelConfig struct {
     VlanID      string `json:"vlan_id"`
 }
 
-// InterfaceConfig はインターフェースの設定を表す構造体
 type InterfaceConfig struct {
     Src      string
     Dst      string
@@ -41,48 +41,55 @@ type InterfaceConfig struct {
     TunnelID string
 }
 
-// BridgeConfig はブリッジの設定を表す構造体
 type BridgeConfig struct {
     Members  []string
     TunnelID string
 }
 
-// SlackHandler はWARN以上のログをSlackに送信するカスタムハンドラ
+// SlackHandler はログをSlackに送信するカスタムハンドラ
 type SlackHandler struct {
     slog.Handler
-    SlackWebhookURL string
+    Settings *Settings
 }
 
 func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
     err := h.Handler.Handle(ctx, r)
-    if r.Level >= slog.LevelWarn && h.SlackWebhookURL != "" {
-        go sendToSlack(r, h.SlackWebhookURL)
+    if r.Level >= slog.LevelWarn && h.Settings.SlackWebhookURL != "" {
+        hostname, err := os.Hostname()
+        if err != nil {
+            hostname = "unknown"
+        }
+
+        msg := fmt.Sprintf("[%s] %s: %s", hostname, r.Level.String(), r.Message)
+        var attrs []slog.Attr
+        r.Attrs(func(a slog.Attr) bool {
+            attrs = append(attrs, a)
+            return true
+        })
+        for _, attr := range attrs {
+            msg += fmt.Sprintf(" %s=%v", attr.Key, attr.Value)
+        }
+
+        go sendToSlack(msg, h.Settings)
     }
     return err
 }
 
-func sendToSlack(r slog.Record, webhookURL string) {
-    hostname, err := os.Hostname()
-    if err != nil {
-        hostname = "unknown"
+func sendToSlack(message string, settings *Settings) {
+    payload := make(map[string]string)
+    payload["text"] = message
+    if settings.SlackChannel != "" {
+        payload["channel"] = settings.SlackChannel
     }
-
-    msg := fmt.Sprintf("[%s] %s: %s", hostname, r.Level.String(), r.Message)
-    var attrs []slog.Attr
-    r.Attrs(func(a slog.Attr) bool {
-        attrs = append(attrs, a)
-        return true
-    })
-    for _, attr := range attrs {
-        msg += fmt.Sprintf(" %s=%v", attr.Key, attr.Value)
+    if settings.SlackUsername != "" {
+        payload["username"] = settings.SlackUsername
     }
-
-    payload := map[string]string{
-        "text": msg,
+    if settings.SlackIconEmoji != "" {
+        payload["icon_emoji"] = settings.SlackIconEmoji
     }
     payloadBytes, _ := json.Marshal(payload)
 
-    resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
+    resp, err := http.Post(settings.SlackWebhookURL, "application/json", bytes.NewBuffer(payloadBytes))
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to send to Slack: %v\n", err)
         return
@@ -91,7 +98,7 @@ func sendToSlack(r slog.Record, webhookURL string) {
 }
 
 // notifyConfigDiff は差分をslog経由でINFOとして出力し、Slackにも通知
-func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, webhookURL string) {
+func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, settings *Settings) {
     if len(gifsToAdd) == 0 && len(gifsToModify) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
         return
     }
@@ -125,21 +132,12 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         }
     }
 
+    // コンソールにINFOログとして出力
     slog.Info(msg.String())
 
-    if webhookURL != "" {
-        payload := map[string]string{
-            "text": msg.String(),
-        }
-        payloadBytes, _ := json.Marshal(payload)
-        go func() {
-            resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Failed to send config diff to Slack: %v\n", err)
-                return
-            }
-            defer resp.Body.Close()
-        }()
+    // Slackが設定されている場合、Slackに送信
+    if settings.SlackWebhookURL != "" {
+        go sendToSlack(msg.String(), settings)
     }
 }
 
@@ -224,7 +222,6 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
     return gifInterfaces, bridgeInterfaces, vlanInterfaces
 }
 
-// loadSettings はローカルの設定ファイルからURLとPhysicalIfaceを読み込む
 func loadSettings(filename string) (Settings, error) {
     data, err := ioutil.ReadFile(filename)
     if err != nil {
@@ -591,7 +588,7 @@ func main() {
             AddSource: false,
             Level:     slog.LevelInfo,
         }),
-        SlackWebhookURL: settings.SlackWebhookURL,
+        Settings: &settings,
     }))
 
     for {
@@ -604,7 +601,7 @@ func main() {
         }
 
         gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
-        notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, settings.SlackWebhookURL)
+        notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
         applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
 
         slog.Info("Configuration check completed", "sleep", interval)
