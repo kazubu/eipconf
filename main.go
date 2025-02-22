@@ -247,6 +247,7 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
+// fetchJSON は指定されたURLからJSONデータを取得し、重複と欠落をチェック
 func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
     resp, err := http.Get(url)
     if err != nil {
@@ -306,7 +307,7 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
                     for _, ip := range ips {
                         if ip.String() == current.Dst {
                             resolvedAddr = current.Dst
-                            slog.Info("Keeping existing dst_addr from resolved IPs", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
+                            slog.Debug("Keeping existing dst_addr from resolved IPs", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
                             break
                         }
                     }
@@ -325,16 +326,14 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
                     if resolvedAddr == "" {
                         // 適切なIPが見つからない場合
                         if current, exists := currentGifs[gif]; exists {
-                            // 既存トンネルの場合、現在のdst_addrを維持
                             resolvedAddr = current.Dst
                             slog.Warn("No suitable IP found for dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr, "isIPv6", isIPv6)
                         } else {
-                            // 新規トンネルの場合、スキップ
                             slog.Error("Skipping tunnel due to no suitable IP for dst_hostname", "index", i, "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "isIPv6", isIPv6)
                             continue
                         }
                     } else {
-                        slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
+                        slog.Debug("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
                     }
                 }
                 config.DstAddr = resolvedAddr
