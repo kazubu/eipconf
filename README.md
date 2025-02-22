@@ -8,10 +8,10 @@ This tool automates the configuration of GIF tunnels, VLANs, and bridges on a ne
 - **VLAN Configuration**: Manages VLAN interfaces tied to a physical interface.
 - **Bridge Management**: Configures bridges with GIF and VLAN members.
 - **DNS Resolution**: Resolves `dst_hostname` to IP addresses, prioritizing IPv6 if `src_addr` is IPv6.
-- **Slack Notifications**: Sends `WARN` and `ERROR` logs, plus configuration diffs, to a Slack channel with customizable channel, username, and icon.
+- **Slack Notifications**: Sends `WARN` and `ERROR` logs, plus configuration diffs, to a Slack channel with customizable channel, username, and icon; color-coded for clarity.
 - **MTU Configuration**: Sets MTU to 1500 for newly created GIF tunnels and bridges.
 - **Logging**: Configurable log levels (DEBUG, INFO, WARN, ERROR) and optional log file output.
-- **Continuous Monitoring**: Periodically fetches and applies the configuration (default: every 30 seconds).
+- **Continuous Monitoring**: Periodically fetches and applies the configuration with a configurable interval (default: 30 seconds).
 
 ## Prerequisites
 
@@ -47,7 +47,8 @@ Create a `settings.json` file in the working directory with the following struct
     "slack_username": "EIPBot",
     "slack_icon_emoji": ":gear:",
     "log_level": "DEBUG",
-    "log_file": "/var/log/eipconf.log"
+    "log_file": "/var/log/eipconf.log",
+    "fetch_interval": 60
 }
 ```
 
@@ -59,6 +60,7 @@ Create a `settings.json` file in the working directory with the following struct
 - `slack_icon_emoji`: Slack icon emoji (e.g., `:gear:`, optional).
 - `log_level`: Log level (`DEBUG`, `INFO`, `WARN`, `ERROR`; optional, defaults to `INFO`).
 - `log_file`: Path to log file (e.g., `/var/log/eipconf.log`; optional, logs to console if unspecified).
+- `fetch_interval`: Interval in seconds to fetch the JSON config (optional, defaults to 30).
 
 ### `config.json` (Remote)
 
@@ -101,18 +103,18 @@ The remote JSON configuration should follow this structure:
    ```
 
 The tool will:
-- Fetch `config.json` from the specified URL every 30 seconds.
+- Fetch `config.json` from the specified URL at the configured interval (e.g., every 60 seconds if set).
 - Apply or update GIF tunnels, VLANs, and bridges as needed.
 - Set MTU to 1500 for newly created GIF tunnels and bridges.
 - Output logs to console and/or a file based on `log_level` and `log_file`.
-- Send Slack notifications for configuration diffs and `WARN`/`ERROR` logs.
+- Send Slack notifications for configuration diffs (green) and `WARN` (yellow) or `ERROR` (red) logs.
 
 ## Logging
 
 - **DEBUG**: Detailed operations (e.g., skipping unchanged interfaces, keeping existing `dst_addr`).
 - **INFO**: Configuration updates, command successes, and periodic checks (not sent to Slack).
-- **WARN**: Non-critical issues (e.g., DNS resolution failures with fallback to existing `dst_addr`)—sent to Slack.
-- **ERROR**: Critical failures (e.g., unresolvable hostnames for new tunnels, command failures)—sent to Slack.
+- **WARN**: Non-critical issues (e.g., DNS resolution failures with fallback to existing `dst_addr`)—sent to Slack in yellow.
+- **ERROR**: Critical failures (e.g., unresolvable hostnames for new tunnels, command failures)—sent to Slack in red.
 
 - **Log Level**: Set via `log_level` in `settings.json` (default: `INFO`).
 - **Log File**: If `log_file` is specified, logs at or above the configured level are written to the file in addition to the console.
@@ -121,7 +123,8 @@ The tool will:
 
 - **MTU**: Only set to 1500 for newly created interfaces. Existing interfaces retain their current MTU.
 - **DNS Resolution**: If `dst_hostname` fails to resolve or lacks a suitable IP (IPv6/IPv4 based on `src_addr`), existing tunnels keep their `dst_addr`, while new tunnels are skipped.
-- **Slack**: Notifications include configuration diffs and `WARN`/`ERROR` logs. `slack_channel`, `slack_username`, and `slack_icon_emoji` are optional; if unset, they are omitted from the payload, using the Webhook's defaults.
+- **Slack**: Notifications include configuration diffs (green) and `WARN`/`ERROR` logs (yellow/red). `slack_channel`, `slack_username`, and `slack_icon_emoji` are optional; if unset, they are omitted from the payload, using the Webhook's defaults.
+- **Fetch Interval**: Configurable via `fetch_interval` in seconds (default: 30). Controls how often the JSON config is fetched.
 
 ## Contributing
 
@@ -129,4 +132,4 @@ Feel free to submit issues or pull requests to enhance functionality or fix bugs
 
 ## License
 
-This project is licensed under MIT license.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
