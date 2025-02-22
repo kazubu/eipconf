@@ -333,7 +333,7 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
                             continue
                         }
                     } else {
-                        slog.Debug("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
+                        slog.Info("Resolved dst_hostname to IP", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr)
                     }
                 }
                 config.DstAddr = resolvedAddr
