@@ -25,6 +25,7 @@ type Settings struct {
     SlackIconEmoji  string `json:"slack_icon_emoji,omitempty"`
     LogLevel        string `json:"log_level,omitempty"`
     LogFile         string `json:"log_file,omitempty"`
+    FetchInterval   int    `json:"fetch_interval,omitempty"`
 }
 
 type TunnelConfig struct {
@@ -268,6 +269,11 @@ func loadSettings(filename string) (Settings, error) {
 
     if envURL := os.Getenv("SLACK_WEBHOOK_URL"); envURL != "" {
         settings.SlackWebhookURL = envURL
+    }
+
+    // FetchIntervalが未指定または0以下の場合、デフォルト30秒
+    if settings.FetchInterval <= 0 {
+        settings.FetchInterval = 30
     }
 
     return settings, nil
@@ -604,8 +610,8 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 // main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
 func main() {
     settingsFile := "settings.json"
-    interval := 30 * time.Second
 
+    // 設定の読み込み（初回のみ）
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
@@ -635,7 +641,6 @@ func main() {
     })
     var handler slog.Handler = consoleHandler
 
-    // ログファイルが指定されている場合、ファイルハンドラを追加
     if settings.LogFile != "" {
         logFile, err := os.OpenFile(settings.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
         if err != nil {
@@ -645,7 +650,6 @@ func main() {
                 AddSource: false,
                 Level:     logLevel,
             })
-            // コンソールとファイルの両方にログを出力するマルチハンドラ
             handler = slogmultiHandler{consoleHandler, fileHandler}
         }
     }
@@ -654,6 +658,9 @@ func main() {
         Handler:  handler,
         Settings: &settings,
     }))
+
+    // 取得間隔を設定
+    interval := time.Duration(settings.FetchInterval) * time.Second
 
     for {
         currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
