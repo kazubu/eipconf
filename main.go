@@ -423,6 +423,13 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
                     slog.Error("Failed to configure tunnel", "gif", gif, "error", err)
                     continue
                 }
+                // MTUとlink0をupの前に設定
+                if err := runCommand("ifconfig", gif, "mtu", "1500"); err != nil {
+                    slog.Error("Failed to set MTU on gif", "gif", gif, "error", err)
+                }
+                if err := runCommand("ifconfig", gif, "link0"); err != nil {
+                    slog.Error("Failed to set link0 on gif", "gif", gif, "error", err)
+                }
                 if err := runCommand("ifconfig", gif, "up"); err != nil {
                     slog.Error("Failed to bring up gif", "gif", gif, "error", err)
                 }
@@ -440,6 +447,13 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
             if err := runCommand("ifconfig", tunnelArgs...); err != nil {
                 slog.Error("Failed to configure tunnel", "gif", gif, "error", err)
                 continue
+            }
+            // MTUとlink0をupの前に設定
+            if err := runCommand("ifconfig", gif, "mtu", "1500"); err != nil {
+                slog.Error("Failed to set MTU on gif", "gif", gif, "error", err)
+            }
+            if err := runCommand("ifconfig", gif, "link0"); err != nil {
+                slog.Error("Failed to set link0 on gif", "gif", gif, "error", err)
             }
             if err := runCommand("ifconfig", gif, "up"); err != nil {
                 slog.Error("Failed to bring up gif", "gif", gif, "error", err)
@@ -468,24 +482,45 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
         if current, exists := currentBridges[bridge]; exists {
             if membersEqual(current.Members, expectedMembers) {
                 slog.Debug("bridge already exists with correct config, skipping", "bridge", bridge)
+            } else {
+                if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
+                    slog.Error("Failed to remove bridge for reconfiguration", "bridge", bridge, "error", err)
+                    continue
+                }
+                if err := runCommand("ifconfig", bridge, "create"); err != nil {
+                    slog.Error("Failed to create bridge", "bridge", bridge, "error", err)
+                    continue
+                }
+                for _, member := range expectedMembers {
+                    if err := runCommand("ifconfig", bridge, "addm", member); err != nil {
+                        slog.Error("Failed to add member to bridge", "member", member, "bridge", bridge, "error", err)
+                    }
+                }
+                // MTUをupの前に設定
+                if err := runCommand("ifconfig", bridge, "mtu", "1500"); err != nil {
+                    slog.Error("Failed to set MTU on bridge", "bridge", bridge, "error", err)
+                }
+                if err := runCommand("ifconfig", bridge, "up"); err != nil {
+                    slog.Error("Failed to bring up bridge", "bridge", bridge, "error", err)
+                }
+            }
+        } else {
+            if err := runCommand("ifconfig", bridge, "create"); err != nil {
+                slog.Error("Failed to create bridge", "bridge", bridge, "error", err)
                 continue
             }
-            if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
-                slog.Error("Failed to remove bridge for reconfiguration", "bridge", bridge, "error", err)
-                continue
+            for _, member := range expectedMembers {
+                if err := runCommand("ifconfig", bridge, "addm", member); err != nil {
+                    slog.Error("Failed to add member to bridge", "member", member, "bridge", bridge, "error", err)
+                }
             }
-        }
-        if err := runCommand("ifconfig", bridge, "create"); err != nil {
-            slog.Error("Failed to create bridge", "bridge", bridge, "error", err)
-            continue
-        }
-        for _, member := range expectedMembers {
-            if err := runCommand("ifconfig", bridge, "addm", member); err != nil {
-                slog.Error("Failed to add member to bridge", "member", member, "bridge", bridge, "error", err)
+            // MTUをupの前に設定
+            if err := runCommand("ifconfig", bridge, "mtu", "1500"); err != nil {
+                slog.Error("Failed to set MTU on bridge", "bridge", bridge, "error", err)
             }
-        }
-        if err := runCommand("ifconfig", bridge, "up"); err != nil {
-            slog.Error("Failed to bring up bridge", "bridge", bridge, "error", err)
+            if err := runCommand("ifconfig", bridge, "up"); err != nil {
+                slog.Error("Failed to bring up bridge", "bridge", bridge, "error", err)
+            }
         }
     }
 
