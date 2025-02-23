@@ -5,6 +5,7 @@ import (
     "context"
     "encoding/json"
     "fmt"
+    "path/filepath"
     "io/ioutil"
     "log/slog"
     "net"
@@ -609,7 +610,8 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 
 // main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
 func main() {
-    settingsFile := "settings.json"
+    exe, err := os.Executable()
+    settingsFile := filepath.Dir(exe) + "/settings.json"
 
     // 設定の読み込み（初回のみ）
     settings, err := loadSettings(settingsFile)
