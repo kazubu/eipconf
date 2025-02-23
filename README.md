@@ -40,7 +40,7 @@ Create a `settings.json` file in the working directory with the following struct
 
 ```json
 {
-    "url": "http://example.com/config.json",
+    "config_source": "http://example.com/config.json",
     "physical_iface": "em2",
     "slack_webhook_url": "https://hooks.slack.com/services/xxx/yyy/zzz",
     "slack_channel": "#network-updates",
@@ -52,7 +52,7 @@ Create a `settings.json` file in the working directory with the following struct
 }
 ```
 
-- `url`: URL to fetch the tunnel configuration JSON (required).
+- `config_source`: Local path or URL to fetch the tunnel configuration JSON (required).
 - `physical_iface`: Physical network interface (e.g., `em2`) for VLANs (required).
 - `slack_webhook_url`: Slack Webhook URL for notifications (optional, can be set via `SLACK_WEBHOOK_URL` environment variable).
 - `slack_channel`: Slack channel name (e.g., `#network-updates`, optional).

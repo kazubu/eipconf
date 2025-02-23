@@ -20,7 +20,7 @@ import (
 )
 
 type Settings struct {
-    URL             string `json:"url"`
+    ConfigSource    string `json:"config_source"`
     PhysicalIface   string `json:"physical_iface"`
     SlackWebhookURL string `json:"slack_webhook_url,omitempty"`
     SlackChannel    string `json:"slack_channel,omitempty"`
@@ -266,15 +266,14 @@ func loadSettings(filename string) (Settings, error) {
         return Settings{}, fmt.Errorf("failed to unmarshal settings: %v", err)
     }
 
-    if settings.URL == "" || settings.PhysicalIface == "" {
-        return Settings{}, fmt.Errorf("URL or PhysicalIface is not specified in settings file")
+    if settings.ConfigSource == "" || settings.PhysicalIface == "" {
+        return Settings{}, fmt.Errorf("ConfigSource or PhysicalIface is not specified in settings file")
     }
 
     if envURL := os.Getenv("SLACK_WEBHOOK_URL"); envURL != "" {
         settings.SlackWebhookURL = envURL
     }
 
-    // FetchIntervalが未指定または0以下の場合、デフォルト30秒
     if settings.FetchInterval <= 0 {
         settings.FetchInterval = 30
     }
@@ -282,17 +281,28 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
-// fetchJSON は指定されたURLからJSONデータを取得し、重複と欠落をチェック
-func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
-    resp, err := http.Get(url)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch JSON: %v", err)
-    }
-    defer resp.Body.Close()
+// fetchConfig は指定されたソース（URLまたはローカルファイル）からトンネル設定を取得し、重複と欠落をチェック
+func fetchConfig(source string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
+    var body []byte
+    var err error
 
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read response body: %v", err)
+    // URLかローカルファイルかを判定
+    if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+        resp, err := http.Get(source)
+        if err != nil {
+            return nil, fmt.Errorf("failed to fetch config from URL: %v", err)
+        }
+        defer resp.Body.Close()
+
+        body, err = ioutil.ReadAll(resp.Body)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read response body: %v", err)
+        }
+    } else {
+        body, err = ioutil.ReadFile(source)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read config file: %v", err)
+        }
     }
 
     var configs []TunnelConfig
@@ -306,7 +316,6 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
     vlanIDs := make(map[string]bool)
 
     for i, config := range configs {
-        // 欠落チェック
         if config.TunnelID == "" {
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing tunnel_id")
             continue
@@ -320,12 +329,10 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
             continue
         }
 
-        // dst_addrとdst_hostnameの処理
         gif := fmt.Sprintf("gif%s", config.TunnelID)
         if config.DstAddr == "" && config.DstHostname != "" {
             ips, err := net.LookupIP(config.DstHostname)
             if err != nil {
-                // 名前解決に失敗した場合
                 if current, exists := currentGifs[gif]; exists {
                     config.DstAddr = current.Dst
                     slog.Warn("Failed to resolve dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", config.DstAddr, "error", err)
@@ -334,11 +341,9 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
                     continue
                 }
             } else {
-                // 名前解決成功
                 isIPv6 := strings.Contains(config.SrcAddr, ":")
                 var resolvedAddr string
                 if current, exists := currentGifs[gif]; exists {
-                    // 既存トンネルで、現在のdst_addrが解決されたIPリストに含まれる場合、そのまま使用
                     for _, ip := range ips {
                         if ip.String() == current.Dst {
                             resolvedAddr = current.Dst
@@ -347,19 +352,17 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
                         }
                     }
                 }
-                // 既存アドレスが見つからない場合、または新規トンネルの場合
                 if resolvedAddr == "" {
                     for _, ip := range ips {
-                        if isIPv6 && ip.To4() == nil { // IPv6を優先
+                        if isIPv6 && ip.To4() == nil {
                             resolvedAddr = ip.String()
                             break
-                        } else if !isIPv6 && ip.To4() != nil { // IPv4を優先
+                        } else if !isIPv6 && ip.To4() != nil {
                             resolvedAddr = ip.String()
                             break
                         }
                     }
                     if resolvedAddr == "" {
-                        // 適切なIPが見つからない場合
                         if current, exists := currentGifs[gif]; exists {
                             resolvedAddr = current.Dst
                             slog.Warn("No suitable IP found for dst_hostname, using existing dst_addr", "tunnel_id", config.TunnelID, "dst_hostname", config.DstHostname, "dst_addr", resolvedAddr, "isIPv6", isIPv6)
@@ -378,7 +381,6 @@ func fetchJSON(url string, currentGifs map[string]InterfaceConfig) ([]TunnelConf
             continue
         }
 
-        // 重複チェック
         if tunnelIDs[config.TunnelID] {
             slog.Error("Skipping tunnel due to duplicate", "index", i, "tunnel_id", config.TunnelID)
             continue
@@ -610,23 +612,20 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     return
 }
 
-// main は定期的にローカル設定ファイルからURLを読み込み、JSONをフェッチして設定を更新
+// main は定期的にローカル設定ファイルから設定を読み込み、トンネル設定をフェッチして適用
 func main() {
     exe, err := os.Executable()
     settingsFile := filepath.Dir(exe) + "/settings.json"
 
-    // シグナルハンドリングの設定
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-    // 設定の読み込み（初回のみ）
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
         os.Exit(1)
     }
 
-    // ログレベルの設定
     var logLevel slog.Level
     switch strings.ToUpper(settings.LogLevel) {
     case "DEBUG":
@@ -636,13 +635,12 @@ func main() {
     case "ERROR":
         logLevel = slog.LevelError
     case "INFO", "":
-        logLevel = slog.LevelInfo // デフォルト
+        logLevel = slog.LevelInfo
     default:
         fmt.Fprintf(os.Stderr, "Invalid log_level: %s, defaulting to INFO\n", settings.LogLevel)
         logLevel = slog.LevelInfo
     }
 
-    // ハンドラの設定
     consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
         AddSource: false,
         Level:     logLevel,
@@ -667,7 +665,6 @@ func main() {
         Settings: &settings,
     }))
 
-    // 開始ログ
     slog.Info("Program start.")
 
     defer func() {
@@ -679,22 +676,20 @@ func main() {
 
     interval := time.Duration(settings.FetchInterval) * time.Second
 
-    // 終了理由を記録するチャネル
     done := make(chan struct{})
     var exitReason string
     var exitCode int
 
     go func() {
-        // メインループ
         for {
             select {
             case <-done:
                 return
             default:
                 currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
-                configs, err := fetchJSON(settings.URL, currentGifs)
+                configs, err := fetchConfig(settings.ConfigSource, currentGifs) // fetchJSONから変更
                 if err != nil {
-                    slog.Error("Failed to fetch JSON", "url", settings.URL, "error", err)
+                    slog.Error("Failed to fetch config", "source", settings.ConfigSource, "error", err)
                     time.Sleep(interval)
                     continue
                 }
