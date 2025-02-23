@@ -12,8 +12,10 @@ import (
     "net/http"
     "os"
     "os/exec"
+    "os/signal"
     "regexp"
     "strings"
+    "syscall"
     "time"
 )
 
@@ -613,11 +615,15 @@ func main() {
     exe, err := os.Executable()
     settingsFile := filepath.Dir(exe) + "/settings.json"
 
+    // シグナルハンドリングの設定
+    sigChan := make(chan os.Signal, 1)
+    signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
     // 設定の読み込み（初回のみ）
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
-        return
+        os.Exit(1)
     }
 
     // ログレベルの設定
@@ -661,27 +667,55 @@ func main() {
         Settings: &settings,
     }))
 
-    // 取得間隔を設定
-    interval := time.Duration(settings.FetchInterval) * time.Second
-
+    // 開始ログ
     slog.Info("Program start.")
 
-    for {
-        currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
-        configs, err := fetchJSON(settings.URL, currentGifs)
-        if err != nil {
-            slog.Error("Failed to fetch JSON", "url", settings.URL, "error", err)
-            time.Sleep(interval)
-            continue
+    defer func() {
+        if r := recover(); r != nil {
+            slog.Error("Program terminated due to panic", "reason", fmt.Sprintf("%v", r))
+            os.Exit(2)
         }
+    }()
 
-        gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
-        notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
-        applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
+    interval := time.Duration(settings.FetchInterval) * time.Second
 
-        slog.Info("Configuration check completed", "sleep", interval)
-        time.Sleep(interval)
-    }
+    // 終了理由を記録するチャネル
+    done := make(chan struct{})
+    var exitReason string
+    var exitCode int
+
+    go func() {
+        // メインループ
+        for {
+            select {
+            case <-done:
+                return
+            default:
+                currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
+                configs, err := fetchJSON(settings.URL, currentGifs)
+                if err != nil {
+                    slog.Error("Failed to fetch JSON", "url", settings.URL, "error", err)
+                    time.Sleep(interval)
+                    continue
+                }
+
+                gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
+                notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
+                applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
+
+                slog.Info("Configuration check completed", "sleep", interval)
+                time.Sleep(interval)
+            }
+        }
+    }()
+
+    sig := <-sigChan
+    close(done)
+    exitReason = fmt.Sprintf("terminated by signal: %v", sig)
+    exitCode = 0
+
+    slog.Info("Program terminated", "reason", exitReason, "exit_code", exitCode)
+    os.Exit(exitCode)
 }
 
 // slogmultiHandler は複数のハンドラを組み合わせるための簡易実装
