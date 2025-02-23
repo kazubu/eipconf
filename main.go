@@ -4,6 +4,7 @@ import (
     "bytes"
     "context"
     "encoding/json"
+    "flag"
     "fmt"
     "path/filepath"
     "io/ioutil"
@@ -612,20 +613,35 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     return
 }
 
-// main は定期的にローカル設定ファイルから設定を読み込み、トンネル設定をフェッチして適用
+// main は定期的に設定ファイルから設定を読み込み、トンネル設定をフェッチして適用
 func main() {
+    // デフォルト設定ファイルパス
     exe, err := os.Executable()
-    settingsFile := filepath.Dir(exe) + "/settings.json"
+    defaultSettingsFile := filepath.Dir(exe) + "/settings.json"
 
+    // コマンドライン引数の定義
+    var settingsFile string
+    flag.StringVar(&settingsFile, "config", defaultSettingsFile, "Path to settings.json file")
+    flag.StringVar(&settingsFile, "c", defaultSettingsFile, "Short form of --config")
+    flag.Parse()
+
+    // 設定ファイルパスの決定: コマンドライン引数 > 環境変数 > デフォルト
+    if envSettingsFile := os.Getenv("EIPCONF_CONF"); envSettingsFile != "" && settingsFile == defaultSettingsFile {
+        settingsFile = envSettingsFile
+    }
+
+    // シグナルハンドリングの設定
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+    // 設定の読み込み
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
         os.Exit(1)
     }
 
+    // ログレベルの設定
     var logLevel slog.Level
     switch strings.ToUpper(settings.LogLevel) {
     case "DEBUG":
@@ -641,6 +657,7 @@ func main() {
         logLevel = slog.LevelInfo
     }
 
+    // ハンドラの設定
     consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
         AddSource: false,
         Level:     logLevel,
@@ -687,7 +704,7 @@ func main() {
                 return
             default:
                 currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
-                configs, err := fetchConfig(settings.ConfigSource, currentGifs) // fetchJSONから変更
+                configs, err := fetchConfig(settings.ConfigSource, currentGifs)
                 if err != nil {
                     slog.Error("Failed to fetch config", "source", settings.ConfigSource, "error", err)
                     time.Sleep(interval)
