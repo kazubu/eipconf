@@ -664,6 +664,8 @@ func main() {
     // 取得間隔を設定
     interval := time.Duration(settings.FetchInterval) * time.Second
 
+    slog.Info("Program start.")
+
     for {
         currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
         configs, err := fetchJSON(settings.URL, currentGifs)
