@@ -21,23 +21,27 @@ import (
 )
 
 type Settings struct {
-    ConfigSource    string `json:"config_source"`
-    PhysicalIface   string `json:"physical_iface"`
-    SlackWebhookURL string `json:"slack_webhook_url,omitempty"`
-    SlackChannel    string `json:"slack_channel,omitempty"`
-    SlackUsername   string `json:"slack_username,omitempty"`
-    SlackIconEmoji  string `json:"slack_icon_emoji,omitempty"`
-    LogLevel        string `json:"log_level,omitempty"`
-    LogFile         string `json:"log_file,omitempty"`
-    FetchInterval   int    `json:"fetch_interval,omitempty"`
+    ConfigSource         string `json:"config_source"`
+    PhysicalIface        string `json:"physical_iface"`
+    SlackWebhookURL      string `json:"slack_webhook_url,omitempty"`
+    SlackChannel         string `json:"slack_channel,omitempty"`
+    SlackUsername        string `json:"slack_username,omitempty"`
+    SlackIconEmoji       string `json:"slack_icon_emoji,omitempty"`
+    LogLevel             string `json:"log_level,omitempty"`
+    LogFile              string `json:"log_file,omitempty"`
+    FetchInterval        int    `json:"fetch_interval,omitempty"`
+    DefaultSrcAddr       string `json:"default_src_addr,omitempty"`
+    DefaultSrcIface      string `json:"default_src_iface,omitempty"`
 }
+
 
 type TunnelConfig struct {
     TunnelID    string `json:"tunnel_id"`
-    SrcAddr     string `json:"src_addr"`
+    SrcAddr     string `json:"src_addr,omitempty"`
     DstAddr     string `json:"dst_addr"`
     DstHostname string `json:"dst_hostname,omitempty"`
     VlanID      string `json:"vlan_id"`
+    IPVersion   string `json:"ip_version,omitempty"` // "4" または "6"
 }
 
 type InterfaceConfig struct {
@@ -282,12 +286,41 @@ func loadSettings(filename string) (Settings, error) {
     return settings, nil
 }
 
+// getInterfaceAddr は指定されたインターフェイスのアドレスを取得
+func getInterfaceAddr(iface string, isIPv6 bool) (string, error) {
+    output, err := exec.Command("ifconfig", iface).Output()
+    if err != nil {
+        return "", fmt.Errorf("failed to get interface address: %v", err)
+    }
+
+    lines := strings.Split(string(output), "\n")
+    for _, line := range lines {
+        if strings.Contains(line, "inet") {
+            if isIPv6 && strings.Contains(line, "inet6") {
+                fields := strings.Fields(line)
+                for _, field := range fields {
+                    if net.ParseIP(field) != nil && strings.Contains(field, ":") {
+                        return field, nil
+                    }
+                }
+            } else if !isIPv6 && strings.Contains(line, "inet") && !strings.Contains(line, "inet6") {
+                fields := strings.Fields(line)
+                for _, field := range fields {
+                    if net.ParseIP(field) != nil && !strings.Contains(field, ":") {
+                        return field, nil
+                    }
+                }
+            }
+        }
+    }
+    return "", fmt.Errorf("no suitable address found for interface %s (IPv6: %v)", iface, isIPv6)
+}
+
 // fetchConfig は指定されたソース（URLまたはローカルファイル）からトンネル設定を取得し、重複と欠落をチェック
-func fetchConfig(source string, currentGifs map[string]InterfaceConfig) ([]TunnelConfig, error) {
+func fetchConfig(source string, currentGifs map[string]InterfaceConfig, settings Settings) ([]TunnelConfig, error) {
     var body []byte
     var err error
 
-    // URLかローカルファイルかを判定
     if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
         resp, err := http.Get(source)
         if err != nil {
@@ -321,13 +354,45 @@ func fetchConfig(source string, currentGifs map[string]InterfaceConfig) ([]Tunne
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing tunnel_id")
             continue
         }
-        if config.SrcAddr == "" {
-            slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing src_addr")
-            continue
-        }
         if config.VlanID == "" {
             slog.Error("Skipping tunnel due to missing field", "index", i, "reason", "missing vlan_id")
             continue
+        }
+
+        // IPバージョンの設定
+        isIPv6 := false
+        switch config.IPVersion {
+        case "6":
+            isIPv6 = true
+        case "4":
+            isIPv6 = false
+        case "":
+            // IPバージョン未指定の場合、デフォルトでソースアドレスから推測
+            if config.SrcAddr != "" {
+                isIPv6 = strings.Contains(config.SrcAddr, ":")
+            }
+        default:
+            slog.Error("Skipping tunnel due to invalid ip_version", "index", i, "tunnel_id", config.TunnelID, "ip_version", config.IPVersion)
+            continue
+        }
+
+        // ソースアドレスの設定
+        if config.SrcAddr == "" {
+            if settings.DefaultSrcIface != "" {
+                addr, err := getInterfaceAddr(settings.DefaultSrcIface, isIPv6)
+                if err != nil {
+                    slog.Error("Failed to get interface address", "interface", settings.DefaultSrcIface, "isIPv6", isIPv6, "error", err)
+                    continue
+                }
+                config.SrcAddr = addr
+                slog.Info("Using interface address as src_addr", "tunnel_id", config.TunnelID, "interface", settings.DefaultSrcIface, "src_addr", config.SrcAddr)
+            } else if settings.DefaultSrcAddr != "" {
+                config.SrcAddr = settings.DefaultSrcAddr
+                slog.Info("Using default src_addr", "tunnel_id", config.TunnelID, "src_addr", config.SrcAddr)
+            } else {
+                slog.Error("Skipping tunnel due to missing src_addr and no default specified", "index", i, "tunnel_id", config.TunnelID)
+                continue
+            }
         }
 
         gif := fmt.Sprintf("gif%s", config.TunnelID)
@@ -342,7 +407,6 @@ func fetchConfig(source string, currentGifs map[string]InterfaceConfig) ([]Tunne
                     continue
                 }
             } else {
-                isIPv6 := strings.Contains(config.SrcAddr, ":")
                 var resolvedAddr string
                 if current, exists := currentGifs[gif]; exists {
                     for _, ip := range ips {
@@ -615,33 +679,27 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 
 // main は定期的に設定ファイルから設定を読み込み、トンネル設定をフェッチして適用
 func main() {
-    // デフォルト設定ファイルパス
     exe, err := os.Executable()
     defaultSettingsFile := filepath.Dir(exe) + "/settings.json"
 
-    // コマンドライン引数の定義
     var settingsFile string
     flag.StringVar(&settingsFile, "config", defaultSettingsFile, "Path to settings.json file")
     flag.StringVar(&settingsFile, "c", defaultSettingsFile, "Short form of --config")
     flag.Parse()
 
-    // 設定ファイルパスの決定: コマンドライン引数 > 環境変数 > デフォルト
     if envSettingsFile := os.Getenv("EIPCONF_CONF"); envSettingsFile != "" && settingsFile == defaultSettingsFile {
         settingsFile = envSettingsFile
     }
 
-    // シグナルハンドリングの設定
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-    // 設定の読み込み
     settings, err := loadSettings(settingsFile)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Initial load settings failed: %v\n", err)
         os.Exit(1)
     }
 
-    // ログレベルの設定
     var logLevel slog.Level
     switch strings.ToUpper(settings.LogLevel) {
     case "DEBUG":
@@ -657,7 +715,6 @@ func main() {
         logLevel = slog.LevelInfo
     }
 
-    // ハンドラの設定
     consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
         AddSource: false,
         Level:     logLevel,
@@ -704,7 +761,7 @@ func main() {
                 return
             default:
                 currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
-                configs, err := fetchConfig(settings.ConfigSource, currentGifs)
+                configs, err := fetchConfig(settings.ConfigSource, currentGifs, settings)
                 if err != nil {
                     slog.Error("Failed to fetch config", "source", settings.ConfigSource, "error", err)
                     time.Sleep(interval)
