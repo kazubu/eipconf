@@ -70,7 +70,6 @@ func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
             hostname = "unknown"
         }
 
-        // ログレベルを明示的に付与
         var levelStr string
         switch r.Level {
         case slog.LevelWarn:
@@ -88,7 +87,8 @@ func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
             return true
         })
         for _, attr := range attrs {
-            msg += fmt.Sprintf(" %s=%v", attr.Key, attr.Value)
+            valueStr := fmt.Sprintf("%v", attr.Value)
+            msg += fmt.Sprintf(" %s=`%s`", attr.Key, valueStr)
         }
 
         go sendToSlack(msg, r.Level, h.Settings)
@@ -97,7 +97,6 @@ func (h *SlackHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func sendToSlack(message string, level slog.Level, settings *Settings) {
-    // ログレベルに基づく色設定
     var color string
     switch level {
     case slog.LevelWarn:
@@ -116,7 +115,6 @@ func sendToSlack(message string, level slog.Level, settings *Settings) {
     payload := make(map[string]interface{})
     payload["attachments"] = []interface{}{attachment}
 
-    // チャンネル、ユーザ名、アイコンの条件付き追加
     if settings.SlackChannel != "" {
         payload["channel"] = settings.SlackChannel
     }
@@ -137,6 +135,7 @@ func sendToSlack(message string, level slog.Level, settings *Settings) {
     defer resp.Body.Close()
 }
 
+
 // notifyConfigDiff は差分をslog経由でINFOとして出力し、Slackにも通知
 func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, settings *Settings) {
     if len(gifsToAdd) == 0 && len(gifsToModify) == 0 && len(gifsToRemove) == 0 && len(bridgesToAdd) == 0 && len(bridgesToRemove) == 0 {
@@ -154,28 +153,29 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
     if len(gifsToAdd) > 0 {
         msg.WriteString("Added tunnels:\n")
         for _, config := range gifsToAdd {
-            msg.WriteString(fmt.Sprintf("- tunnel_id=%s, src_addr=%s, dst_addr=%s, vlan_id=%s\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+            // すべての動的値をバックティックで囲む
+            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
         }
     }
 
     if len(gifsToModify) > 0 {
         msg.WriteString("Modified tunnels:\n")
         for _, config := range gifsToModify {
-            msg.WriteString(fmt.Sprintf("- tunnel_id=%s, src_addr=%s, dst_addr=%s, vlan_id=%s\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
         }
     }
 
     if len(gifsToRemove) > 0 {
         msg.WriteString("Removed tunnels:\n")
         for _, config := range gifsToRemove {
-            msg.WriteString(fmt.Sprintf("- tunnel_id=%s, src_addr=%s, dst_addr=%s, vlan_id=%s\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
         }
     }
 
     slog.Info(msg.String())
 
     if settings.SlackWebhookURL != "" {
-        go sendToSlack(msg.String(), slog.LevelInfo, settings) // 差分はINFOとして扱う
+        go sendToSlack(msg.String(), slog.LevelInfo, settings)
     }
 }
 
