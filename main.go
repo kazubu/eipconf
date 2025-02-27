@@ -485,8 +485,9 @@ func membersEqual(m1, m2 []string) bool {
     return true
 }
 
+// applyConfig は差分に基づいて設定を適用
 func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfig, bridgesToAdd, bridgesToRemove map[string]BridgeConfig, configs []TunnelConfig, settings Settings,
-    currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig) {
+    currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig, forceReset bool) {
     vlanToRemove := make(map[string]bool)
     for vlan := range currentVLANs {
         vlanToRemove[vlan] = true
@@ -511,11 +512,10 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
 
         delete(vlanToRemove, vlanIface)
 
-        if current, exists := currentGifs[gif]; exists {
+        if current, exists := currentGifs[gif]; exists && !forceReset {
             if current.Src == config.SrcAddr && current.Dst == config.DstAddr && current.IsIPv6 == strings.Contains(config.SrcAddr, ":") {
                 slog.Debug("gif already exists with correct config, skipping", "gif", gif)
             } else {
-                // 既存トンネルの変更
                 tunnelArgs := []string{gif}
                 if strings.Contains(config.SrcAddr, ":") {
                     tunnelArgs = append(tunnelArgs, "inet6")
@@ -533,7 +533,6 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
                 }
             }
         } else {
-            // 新規トンネル
             if err := runCommand("ifconfig", gif, "create"); err != nil {
                 slog.Error("Failed to create gif", "gif", gif, "error", err)
                 continue
@@ -558,7 +557,7 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
             }
         }
 
-        if vlanID, exists := currentVLANs[vlanIface]; exists && vlanID == config.VlanID {
+        if vlanID, exists := currentVLANs[vlanIface]; exists && vlanID == config.VlanID && !forceReset {
             slog.Debug("VLAN already exists with correct config, skipping", "vlan", vlanIface)
         } else {
             if _, exists := currentVLANs[vlanIface]; exists {
@@ -577,11 +576,10 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
         }
 
         expectedMembers := []string{gif, vlanIface}
-        if current, exists := currentBridges[bridge]; exists {
+        if current, exists := currentBridges[bridge]; exists && !forceReset {
             if membersEqual(current.Members, expectedMembers) {
                 slog.Debug("bridge already exists with correct config, skipping", "bridge", bridge)
             } else {
-                // 既存ブリッジの変更
                 if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
                     slog.Error("Failed to remove bridge for reconfiguration", "bridge", bridge, "error", err)
                     continue
@@ -600,7 +598,6 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
                 }
             }
         } else {
-            // 新規ブリッジ
             if err := runCommand("ifconfig", bridge, "create"); err != nil {
                 slog.Error("Failed to create bridge", "bridge", bridge, "error", err)
                 continue
@@ -677,6 +674,103 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
     return
 }
 
+// waitForInterfacesRemoval は指定されたインターフェイス群がすべて削除されるのを待機
+func waitForInterfacesRemoval(interfaces []string) error {
+    slog.Debug("Starting interface removal check", "interfaces", interfaces)
+    timeout := 10 * time.Second
+    interval := 50 * time.Millisecond
+    remaining := []string{}
+    start := time.Now()
+
+    for time.Since(start) < timeout {
+        output, err := exec.Command("ifconfig", "-a").Output()
+        if err != nil {
+            slog.Warn("Failed to check interfaces removal", "error", err)
+            time.Sleep(interval)
+            continue
+        }
+        outputStr := string(output)
+        remaining := []string{}
+        for _, iface := range interfaces {
+            if strings.Contains(outputStr, iface) {
+                remaining = append(remaining, iface)
+            }
+        }
+        if len(remaining) == 0 {
+            slog.Debug("All interfaces removed successfully", "interfaces", interfaces)
+	    slog.Debug("Last ifconfig:", "ifconfig", outputStr)
+            return nil
+        }
+        time.Sleep(interval)
+    }
+
+    slog.Warn("Timeout waiting for interfaces removal", "remaining", remaining, "timeout", timeout)
+    return fmt.Errorf("some interfaces still exist after %v: %v", timeout, remaining)
+}
+
+// resetVLANs は物理インターフェイスのVLANをすべて削除
+func resetVLANs(physicalIface string, currentVLANs map[string]string) error {
+    var vlansToRemove []string
+    for vlan := range currentVLANs {
+        if strings.HasPrefix(vlan, physicalIface+".") {
+            if err := runCommand("ifconfig", vlan, "destroy"); err != nil {
+                slog.Error("Failed to remove VLAN during reset", "vlan", vlan, "error", err)
+                return err
+            }
+            vlansToRemove = append(vlansToRemove, vlan)
+        }
+    }
+
+    if len(vlansToRemove) > 0 {
+        if err := waitForInterfacesRemoval(vlansToRemove); err != nil {
+            slog.Error("Failed to confirm VLANs removal", "vlans", vlansToRemove, "error", err)
+            return err
+        }
+    }
+
+    slog.Info("Successfully reset VLANs for physical interface", "physical_iface", physicalIface)
+    return nil
+}
+
+// resetAllInterfaces はトンネル、VLAN、ブリッジをすべて削除
+func resetAllInterfaces(currentGifs map[string]InterfaceConfig, currentVLANs map[string]string, currentBridges map[string]BridgeConfig) error {
+    var interfacesToRemove []string
+
+    for gif := range currentGifs {
+        if err := runCommand("ifconfig", gif, "destroy"); err != nil {
+            slog.Error("Failed to remove GIF tunnel during reset", "gif", gif, "error", err)
+            return err
+        }
+        interfacesToRemove = append(interfacesToRemove, gif)
+    }
+
+    for vlan := range currentVLANs {
+        if err := runCommand("ifconfig", vlan, "destroy"); err != nil {
+            slog.Error("Failed to remove VLAN during reset", "vlan", vlan, "error", err)
+            return err
+        }
+        interfacesToRemove = append(interfacesToRemove, vlan)
+    }
+
+    for bridge := range currentBridges {
+        if err := runCommand("ifconfig", bridge, "destroy"); err != nil {
+            slog.Error("Failed to remove bridge during reset", "bridge", bridge, "error", err)
+            return err
+        }
+        interfacesToRemove = append(interfacesToRemove, bridge)
+    }
+
+    if len(interfacesToRemove) > 0 {
+        if err := waitForInterfacesRemoval(interfacesToRemove); err != nil {
+            slog.Error("Failed to confirm all interfaces removal", "interfaces", interfacesToRemove, "error", err)
+            return err
+        }
+    }
+
+    slog.Info("Successfully reset all interfaces (GIF tunnels, VLANs, and bridges)")
+    return nil
+}
+
 // main は定期的に設定ファイルから設定を読み込み、トンネル設定をフェッチして適用
 func main() {
     exe, err := os.Executable()
@@ -692,7 +786,7 @@ func main() {
     }
 
     sigChan := make(chan os.Signal, 1)
-    signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+    signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2)
 
     settings, err := loadSettings(settingsFile)
     if err != nil {
@@ -770,7 +864,7 @@ func main() {
 
                 gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
                 notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
-                applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges)
+                applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges, false)
 
                 slog.Info("Configuration check completed", "sleep", interval)
                 time.Sleep(interval)
@@ -778,13 +872,59 @@ func main() {
         }
     }()
 
-    sig := <-sigChan
-    close(done)
-    exitReason = fmt.Sprintf("terminated by signal: %v", sig)
-    exitCode = 0
-
-    slog.Info("Program terminated", "reason", exitReason, "exit_code", exitCode)
-    os.Exit(exitCode)
+    for {
+        sig := <-sigChan
+        switch sig {
+        case syscall.SIGHUP:
+            slog.Info("Received SIGHUP, forcing immediate config update")
+            currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
+            configs, err := fetchConfig(settings.ConfigSource, currentGifs, settings)
+            if err != nil {
+                slog.Error("Failed to fetch config after SIGHUP", "source", settings.ConfigSource, "error", err)
+            } else {
+                gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
+                notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
+                applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges, false)
+                slog.Info("Immediate config update completed after SIGHUP")
+            }
+        case syscall.SIGUSR1:
+            slog.Info("Received SIGUSR1, resetting VLANs")
+            currentGifs, _, currentVLANs := getCurrentInterfaces()
+            if err := resetVLANs(settings.PhysicalIface, currentVLANs); err == nil {
+                configs, err := fetchConfig(settings.ConfigSource, currentGifs, settings)
+                if err != nil {
+                    slog.Error("Failed to fetch config after SIGUSR1", "source", settings.ConfigSource, "error", err)
+                } else {
+                    currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
+                    gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
+                    notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
+                    applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges, false)
+                    slog.Info("Reconfiguration completed after SIGUSR1")
+                }
+            }
+        case syscall.SIGUSR2:
+            slog.Info("Received SIGUSR2, resetting all interfaces")
+            currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
+            if err := resetAllInterfaces(currentGifs, currentVLANs, currentBridges); err == nil {
+                configs, err := fetchConfig(settings.ConfigSource, currentGifs, settings)
+                if err != nil {
+                    slog.Error("Failed to fetch config after SIGUSR2", "source", settings.ConfigSource, "error", err)
+                } else {
+                    currentGifs, currentBridges, currentVLANs := getCurrentInterfaces()
+                    gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
+                    notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
+                    applyConfig(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, configs, settings, currentGifs, currentVLANs, currentBridges, false)
+                    slog.Info("Reconfiguration completed after SIGUSR2")
+                }
+            }
+        case syscall.SIGINT, syscall.SIGTERM:
+            close(done)
+            exitReason = fmt.Sprintf("terminated by signal: %v", sig)
+            exitCode = 0
+            slog.Info("Program terminated", "reason", exitReason, "exit_code", exitCode)
+            os.Exit(exitCode)
+        }
+    }
 }
 
 // slogmultiHandler は複数のハンドラを組み合わせるための簡易実装
