@@ -698,7 +698,6 @@ func waitForInterfacesRemoval(interfaces []string) error {
         }
         if len(remaining) == 0 {
             slog.Debug("All interfaces removed successfully", "interfaces", interfaces)
-	    slog.Debug("Last ifconfig:", "ifconfig", outputStr)
             return nil
         }
         time.Sleep(interval)
@@ -849,6 +848,7 @@ func main() {
     var exitCode int
 
     go func() {
+        fail_interval := 5
         for {
             select {
             case <-done:
@@ -858,9 +858,12 @@ func main() {
                 configs, err := fetchConfig(settings.ConfigSource, currentGifs, settings)
                 if err != nil {
                     slog.Error("Failed to fetch config", "source", settings.ConfigSource, "error", err)
-                    time.Sleep(interval)
+                    time.Sleep(time.Duration(fail_interval) * time.Second)
+                    fail_interval += 5
                     continue
                 }
+
+                fail_interval = 5
 
                 gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove := calculateDiff(currentGifs, currentBridges, configs, settings.PhysicalIface)
                 notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove, bridgesToAdd, bridgesToRemove, &settings)
