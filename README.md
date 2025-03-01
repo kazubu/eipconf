@@ -1,46 +1,60 @@
 # EIP Configuration Tool
 
-This tool automates the configuration of GIF tunnels, VLANs, and bridges on a network interface based on a JSON configuration fetched from a specified source (URL or local file). It supports dynamic updates, DNS resolution for destination hostnames, customizable Slack notifications, and MTU settings for new interfaces.
+The EIP Configuration Tool automates the configuration of GIF tunnels, VLANs, and bridge interfaces on a server by periodically fetching a JSON configuration from an HTTP endpoint or local file. In the latest version, an optional "description" field can be specified for each tunnel configuration. This description is applied to the corresponding GIF interface via ifconfig, and any changes (including those due to extra whitespace) are detected and updated accordingly.
 
 ## Features
 
-- **GIF Tunnel Management**: Creates, updates, or removes GIF tunnels based on JSON config.
-- **VLAN Configuration**: Manages VLAN interfaces tied to a physical interface.
-- **Bridge Management**: Configures bridges with GIF and VLAN members.
-- **IP Version Specification**: Explicitly specify IPv4 or IPv6 for tunnels via `ip_version` ("4" or "6").
-- **DNS Resolution**: Resolves `dst_hostname` to IP addresses, respecting the specified or inferred IP version (IPv6 prioritized if `src_addr` is IPv6).
-- **Default Source Configuration**: Optionally set a default source address (`default_src_addr`) or interface (`default_src_iface`) in `settings.json`, allowing `src_addr` omission in the config source; dynamically tracks interface address changes if `default_src_iface` is used.
-- **Slack Notifications**: Sends `WARN` and `ERROR` logs, plus configuration diffs, to a Slack channel with customizable channel, username, and icon; color-coded for clarity (green for diffs, yellow for WARN, red for ERROR).
-- **MTU Configuration**: Sets MTU to 1500 for newly created GIF tunnels and bridges.
-- **Logging**: Configurable log levels (DEBUG, INFO, WARN, ERROR) and optional log file output.
-- **Continuous Monitoring**: Periodically fetches and applies the configuration with a configurable interval (default: 30 seconds).
+- **GIF Tunnel Management**
+  - Creates, updates, or removes GIF interfaces based on the JSON configuration.
+  - Compares source and destination addresses, IPv6 settings, and the description field (after trimming whitespace) to detect differences.
+- **VLAN Configuration**
+  - Sets up VLAN interfaces on a specified physical interface and associates them with GIF tunnels.
+- **Bridge Management**
+  - Combines GIF and VLAN interfaces into bridges for integrated network connectivity.
+- **Description Field**
+  - An optional `description` can be included in each tunnel configuration.
+  - The tool retrieves the current GIF interface’s description from ifconfig, trims whitespace, and compares it with the JSON value. If differences are detected, the GIF interface is updated.
+- **DNS Resolution**
+  - If a `dst_hostname` is provided, the tool resolves it to an IP address based on the specified or inferred IP version.
+- **Default Source Address**
+  - If `src_addr` is omitted, the tool uses a default source address or dynamically fetches the IP from a specified default interface.
+- **Slack Notifications**
+  - Warning and error logs—as well as configuration differences—can be sent to Slack. Slack channel, username, and icon can be configured.
+- **MTU Setting**
+  - New GIF tunnels and bridges are configured with an MTU of 1500.
+- **Logging**
+  - Detailed logging (DEBUG, INFO, WARN, ERROR) is output to the console and optionally to a log file.
+- **Continuous Monitoring**
+  - The tool fetches the JSON configuration at a configurable interval and applies updates only when differences are detected.
 
-## Prerequisites
+## Requirements
 
 - Go 1.21 or later
-- Root privileges (required for `ifconfig` commands)
-- A Slack Webhook URL (optional, for notifications)
+- Root privileges (required for executing ifconfig commands)
+- Slack Webhook URL (optional, for notifications)
 
 ## Installation
 
-1. Clone the repository or copy the source code:
-   ```bash
-   git clone <repository-url>
-   cd <repository-dir>
-   ```
+1. Clone the repository or download the source code:
+
+``` bash
+git clone <repository-url>
+cd <repository-dir>
+```
 
 2. Build the binary:
-   ```bash
-   go build -o eipconf
-   ```
+
+``` bash
+go build -o eipconf
+```
 
 ## Configuration
 
-### `settings.json`
+### settings.json
 
-Create a `settings.json` file in the same directory as the executable (or specify via `--config`/`-c` flag or `EIPCONF_CONF` environment variable) with the following structure:
+Place a `settings.json` file in the same directory as the executable, or specify its path using the `--config`/`-c` flag or the `EIPCONF_CONF` environment variable. Below is an example configuration:
 
-```json
+``` json
 {
     "config_source": "http://example.com/config.json",
     "physical_iface": "em2",
@@ -56,104 +70,84 @@ Create a `settings.json` file in the same directory as the executable (or specif
 }
 ```
 
-- `config_source`: URL or local file path to fetch the tunnel configuration JSON (required).
-- `physical_iface`: Physical network interface (e.g., `em2`) for VLANs (required).
-- `slack_webhook_url`: Slack Webhook URL for notifications (optional, can be set via `SLACK_WEBHOOK_URL` environment variable).
-- `slack_channel`: Slack channel name (e.g., `#network-updates`, optional).
-- `slack_username`: Slack username (e.g., `EIPBot`, optional).
-- `slack_icon_emoji`: Slack icon emoji (e.g., `:gear:`, optional).
-- `log_level`: Log level (`DEBUG`, `INFO`, `WARN`, `ERROR`; optional, defaults to `INFO`).
-- `log_file`: Path to log file (e.g., `/var/log/eipconf.log`; optional, logs to console if unspecified).
-- `fetch_interval`: Interval in seconds to fetch the config (optional, defaults to 30).
-- `default_src_addr`: Default source IP address (e.g., `2001:db8::1`, optional; used if `src_addr` is omitted in config).
-- `default_src_iface`: Default source interface (e.g., `em0`, optional; dynamically fetches address if `src_addr` is omitted).
+- **config_source**: URL or local file path for the tunnel configuration JSON (required).
+- **physical_iface**: Physical network interface for VLANs (required).
+- Other fields configure Slack notifications, logging, fetch interval, and default source address settings.
 
-### `config.json` (Config Source)
+### config.json (Example)
 
-The configuration source (URL or local file) should follow this structure:
+The configuration file should be a JSON array as shown below:
 
-```json
+``` json
 [
     {
-        "tunnel_id": "0",
+        "tunnel_id": "1",
+        "src_addr": "2001:db8::1",
         "dst_addr": "2001:db8::2",
         "vlan_id": "100",
-        "ip_version": "6"
+        "ip_version": "6",
+        "description": "Production tunnel"
     },
     {
-        "tunnel_id": "1",
+        "tunnel_id": "2",
         "dst_hostname": "example.com",
         "vlan_id": "101",
-        "ip_version": "4"
+        "ip_version": "4",
+        "description": "Backup tunnel"
     }
 ]
 ```
 
-- `tunnel_id`: Unique identifier for the tunnel (e.g., `0`, `1`).
-- `src_addr`: Source IP address (IPv4 or IPv6, optional if `default_src_addr` or `default_src_iface` is set in `settings.json`).
-- `dst_addr`: Destination IP address (optional if `dst_hostname` is provided).
-- `dst_hostname`: Destination hostname (resolved to IP, respecting `ip_version` or inferred from `src_addr`).
-- `vlan_id`: VLAN ID for the interface.
-- `ip_version`: IP version (`"4"` for IPv4, `"6"` for IPv6; optional, inferred from `src_addr` if omitted).
+- **tunnel_id**: Unique identifier for the tunnel.
+- **src_addr**: Source IP address (optional; if omitted, `default_src_addr` or `default_src_iface` is used).
+- **dst_addr**: Destination IP address (or use `dst_hostname` for DNS resolution).
+- **dst_hostname**: Destination hostname (DNS will be resolved).
+- **vlan_id**: VLAN ID associated with the tunnel.
+- **ip_version**: "4" for IPv4 or "6" for IPv6.
+- **description**: Optional description applied to the GIF interface. Whitespace is trimmed before comparison, ensuring that any changes are detected and updated.
 
 ## Usage
 
-1. Run the tool with root privileges (default settings file in executable directory):
-   ```bash
-   sudo ./eipconf
-   ```
+Run the tool with root privileges:
 
-2. Specify a custom settings file via command-line flag:
-   ```bash
-   sudo ./eipconf --config=/path/to/custom.json
-   # or
-   sudo ./eipconf -c=/path/to/custom.json
-   ```
+```bash
+sudo ./eipconf
+```
 
-3. Specify via environment variable:
-   ```bash
-   export EIPCONF_CONF=/path/to/env.json
-   sudo ./eipconf
-   ```
+To specify a custom settings file:
 
-4. Optionally set the Slack Webhook URL via environment variable:
-   ```bash
-   export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/xxx/yyy/zzz"
-   sudo ./eipconf
-   ```
+``` bash
+sudo ./eipconf --config=/path/to/settings.json
+```
 
-The tool will:
-- Fetch `config.json` from the specified `config_source` at the configured interval (e.g., every 60 seconds if set).
-- Apply or update GIF tunnels, VLANs, and bridges as needed, using `default_src_addr` or `default_src_iface` if `src_addr` is omitted.
-- Set MTU to 1500 for newly created GIF tunnels and bridges.
-- Output logs to console and/or a file based on `log_level` and `log_file`.
-- Send Slack notifications for configuration diffs (green) and `WARN` (yellow) or `ERROR` (red) logs.
+For Slack notifications, you can also set the Slack Webhook URL via an environment variable:
+
+``` bash
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/xxx/yyy/zzz"
+sudo ./eipconf
+```
+
+The tool periodically fetches the JSON configuration and applies updates to the server’s interfaces when differences (including in the description field) are detected.
 
 ## Logging
 
-- **DEBUG**: Detailed operations (e.g., skipping unchanged interfaces, keeping existing `dst_addr`).
-- **INFO**: Configuration updates, command successes, and periodic checks (not sent to Slack).
-- **WARN**: Non-critical issues (e.g., DNS resolution failures with fallback to existing `dst_addr`)—sent to Slack in yellow.
-- **ERROR**: Critical failures (e.g., unresolvable hostnames for new tunnels, command failures)—sent to Slack in red.
+- **DEBUG**: Detailed internal operations, including diff detection and ifconfig output parsing.
+- **INFO**: Configuration updates, command execution results, and periodic check status.
+- **WARN/ERROR**: Warnings and errors (also sent to Slack if configured).
 
-- **Log Level**: Set via `log_level` in `settings.json` (default: `INFO`).
-- **Log File**: If `log_file` is specified, logs at or above the configured level are written to the file in addition to the console.
+Logs are output to both the console and to the file specified by `log_file`.
 
 ## Notes
 
-- **MTU**: Only set to 1500 for newly created interfaces. Existing interfaces retain their current MTU.
-- **DNS Resolution**: If `dst_hostname` fails to resolve or lacks a suitable IP (based on `ip_version` or inferred from `src_addr`), existing tunnels keep their `dst_addr`, while new tunnels are skipped.
-- **Default Source**:
-  - If `src_addr` is omitted, `default_src_addr` or `default_src_iface` from `settings.json` is used.
-  - `default_src_iface` dynamically fetches the interface's address each time the config is fetched, adapting to IP changes.
-- **Slack**: Notifications include configuration diffs (green) and `WARN`/`ERROR` logs (yellow/red). `slack_channel`, `slack_username`, and `slack_icon_emoji` are optional; if unset, they are omitted from the payload, using the Webhook's defaults.
-- **Fetch Interval**: Configurable via `fetch_interval` in seconds (default: 30). Controls how often the config is fetched.
-- **Settings File Location**: By default, `settings.json` is expected in the executable directory, but can be overridden with `--config`/`-c` or `EIPCONF_CONF`.
+- **Description Updates**
+  The GIF interface’s description is updated if the JSON `description` differs from the current ifconfig output (after trimming extra whitespace). This ensures that even if the interface already exists, any changes in the description field are correctly detected and applied.
 
-## Contributing
+- **DNS Resolution**
+  If `dst_hostname` is specified but cannot be resolved, the existing configuration is maintained or new tunnels are skipped.
 
-Feel free to submit issues or pull requests to enhance functionality or fix bugs.
+- **Fetch Interval**
+  The configuration is re-fetched every `fetch_interval` seconds, and updates are applied only when necessary.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the LICENSE file for details.
