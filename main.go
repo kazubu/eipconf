@@ -42,6 +42,7 @@ type TunnelConfig struct {
     DstHostname string `json:"dst_hostname,omitempty"`
     VlanID      string `json:"vlan_id"`
     IPVersion   string `json:"ip_version,omitempty"` // "4" または "6"
+    Description string `json:"description,omitempty"`
 }
 
 type InterfaceConfig struct {
@@ -50,6 +51,7 @@ type InterfaceConfig struct {
     Vlan     string
     IsIPv6   bool
     TunnelID string
+    Description string
 }
 
 type BridgeConfig struct {
@@ -154,14 +156,14 @@ func notifyConfigDiff(gifsToAdd, gifsToModify, gifsToRemove map[string]Interface
         msg.WriteString("Added tunnels:\n")
         for _, config := range gifsToAdd {
             // すべての動的値をバックティックで囲む
-            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`, description=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan, config.Description))
         }
     }
 
     if len(gifsToModify) > 0 {
         msg.WriteString("Modified tunnels:\n")
         for _, config := range gifsToModify {
-            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan))
+            msg.WriteString(fmt.Sprintf("- tunnel_id=`%s`, src_addr=`%s`, dst_addr=`%s`, vlan_id=`%s`, description=`%s`\n", config.TunnelID, config.Src, config.Dst, config.Vlan, config.Description))
         }
     }
 
@@ -221,15 +223,23 @@ func getCurrentInterfaces() (map[string]InterfaceConfig, map[string]BridgeConfig
             if gifName != "" {
                 detail, _ := exec.Command("ifconfig", gifName).Output()
                 detailStr := string(detail)
+                var desc string
+                for _, l := range strings.Split(detailStr, "\n") {
+                    l = strings.TrimSpace(l)
+                    if strings.HasPrefix(l, "description:") {
+                        desc = strings.TrimSpace(strings.TrimPrefix(l, "description:"))
+                        break
+                    }
+                }
                 srcDstIPv4 := regexp.MustCompile(`tunnel inet (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
                 srcDstIPv6 := regexp.MustCompile(`tunnel inet6 (\S+) --> (\S+)`).FindStringSubmatch(detailStr)
                 tunnelID := strings.TrimPrefix(gifName, "gif")
                 if len(srcDstIPv4) == 3 {
-                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv4[1], Dst: srcDstIPv4[2], Vlan: "", IsIPv6: false, TunnelID: tunnelID}
+                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv4[1], Dst: srcDstIPv4[2], Vlan: "", IsIPv6: false, TunnelID: tunnelID, Description: desc}
                 } else if len(srcDstIPv6) == 3 {
-                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv6[1], Dst: srcDstIPv6[2], Vlan: "", IsIPv6: true, TunnelID: tunnelID}
+                    gifInterfaces[gifName] = InterfaceConfig{Src: srcDstIPv6[1], Dst: srcDstIPv6[2], Vlan: "", IsIPv6: true, TunnelID: tunnelID, Description: desc}
                 } else {
-                    gifInterfaces[gifName] = InterfaceConfig{Src: "", Dst: "", Vlan: "", IsIPv6: false, TunnelID: tunnelID}
+                    gifInterfaces[gifName] = InterfaceConfig{Src: "", Dst: "", Vlan: "", IsIPv6: false, TunnelID: tunnelID, Description: desc}
                 }
             }
         }
@@ -513,7 +523,7 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
         delete(vlanToRemove, vlanIface)
 
         if current, exists := currentGifs[gif]; exists && !forceReset {
-            if current.Src == config.SrcAddr && current.Dst == config.DstAddr && current.IsIPv6 == strings.Contains(config.SrcAddr, ":") {
+            if current.Src == config.SrcAddr && current.Dst == config.DstAddr && current.IsIPv6 == strings.Contains(config.SrcAddr, ":") && current.Description == config.Description {
                 slog.Debug("gif already exists with correct config, skipping", "gif", gif)
             } else {
                 tunnelArgs := []string{gif}
@@ -530,6 +540,13 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
                 }
                 if err := runCommand("ifconfig", gif, "up"); err != nil {
                     slog.Error("Failed to bring up gif", "gif", gif, "error", err)
+                }
+                if config.Description != "" {
+                    if err := runCommand("ifconfig", gif, "description", config.Description); err != nil {
+                        slog.Error("Failed to update description on gif", "gif", gif, "error", err)
+                    } else {
+                        slog.Info("Updated gif description", "gif", gif, "description", config.Description)
+                    }
                 }
             }
         } else {
@@ -554,6 +571,13 @@ func applyConfig(gifsToAdd, gifsToModify, gifsToRemove map[string]InterfaceConfi
             }
             if err := runCommand("ifconfig", gif, "up"); err != nil {
                 slog.Error("Failed to bring up gif", "gif", gif, "error", err)
+            }
+            if config.Description != "" {
+                if err := runCommand("ifconfig", gif, "description", config.Description); err != nil {
+                    slog.Error("Failed to set description on gif", "gif", gif, "error", err)
+                } else {
+                    slog.Info("Set gif description", "gif", gif, "description", config.Description)
+                }
             }
         }
 
@@ -633,7 +657,7 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
         gif := fmt.Sprintf("gif%s", config.TunnelID)
         bridge := fmt.Sprintf("bridge%s", config.TunnelID)
         isIPv6 := strings.Contains(config.SrcAddr, ":") || strings.Contains(config.DstAddr, ":")
-        jsonGifs[gif] = InterfaceConfig{Src: config.SrcAddr, Dst: config.DstAddr, Vlan: config.VlanID, IsIPv6: isIPv6, TunnelID: config.TunnelID}
+        jsonGifs[gif] = InterfaceConfig{Src: config.SrcAddr, Dst: config.DstAddr, Vlan: config.VlanID, IsIPv6: isIPv6, TunnelID: config.TunnelID, Description: config.Description}
         jsonBridges[bridge] = BridgeConfig{
             Members:  []string{gif, fmt.Sprintf("%s.%s", physicalIface, config.VlanID)},
             TunnelID: config.TunnelID,
@@ -648,7 +672,7 @@ func calculateDiff(currentGifs map[string]InterfaceConfig, currentBridges map[st
 
     for k, v := range jsonGifs {
         if current, exists := currentGifs[k]; exists {
-            if current.Src != v.Src || current.Dst != v.Dst || current.IsIPv6 != v.IsIPv6 {
+            if current.Src != v.Src || current.Dst != v.Dst || current.IsIPv6 != v.IsIPv6 || current.Description != v.Description {
                 gifsToModify[k] = v
             }
         } else {
